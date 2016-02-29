@@ -983,6 +983,11 @@
 			"Rev": "7cf5571b3b32a7c7b5605dc5ed8ad8fdbb2135f0"
 		},
 		{
+			"ImportPath": "gopkg.in/mgo.v2",
+			"Comment": "v2",
+			"Rev": "d90005c5262a3463800497ea5a89aed5fe22c886"
+		},
+		{
 			"ImportPath": "gopkg.in/natefinch/lumberjack.v2",
 			"Comment": "v1.0-18-g600ceb4",
 			"Rev": "600ceb4523e5b7ff745f91083c8a023c2bf73af5"
