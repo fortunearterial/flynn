@@ -1,9 +1,6 @@
 package mongodb
 
 import (
-	"crypto/sha512"
-	"encoding/hex"
-	"io"
 	"net/http"
 
 	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/julienschmidt/httprouter"

@@ -1,20 +1,13 @@
 package mongodb
 
 import (
-	"bytes"
-	"crypto/sha512"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
-	"io/ioutil"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"text/template"
@@ -22,7 +15,8 @@ import (
 
 	"github.com/flynn/flynn/Godeps/_workspace/src/gopkg.in/inconshreveable/log15.v2"
 	"github.com/flynn/flynn/Godeps/_workspace/src/gopkg.in/mgo.v2"
-	"github.com/flynn/flynn/appliance/mariadb/mdbxlog"
+	"github.com/flynn/flynn/Godeps/_workspace/src/gopkg.in/mgo.v2/bson"
+	mongodbxlog "github.com/flynn/flynn/appliance/mongodb/xlog"
 	"github.com/flynn/flynn/discoverd/client"
 	"github.com/flynn/flynn/pkg/shutdown"
 	"github.com/flynn/flynn/pkg/sirenia/client"
@@ -54,7 +48,7 @@ var (
 	ErrNoReplicationStatus = errors.New("no replication status")
 )
 
-// Process represents a MariaDB process.
+// Process represents a MongoDB process.
 type Process struct {
 	mtx sync.Mutex
 
@@ -97,7 +91,7 @@ func NewProcess() *Process {
 		Password:    DefaultPassword,
 		OpTimeout:   DefaultOpTimeout,
 		ReplTimeout: DefaultReplTimeout,
-		Logger:      log15.New("app", "mariadb"),
+		Logger:      log15.New("app", "mongodb"),
 
 		events:         make(chan state.DatabaseEvent, 1),
 		cancelSyncWait: func() {},
@@ -179,7 +173,7 @@ func (p *Process) Ready() <-chan state.DatabaseEvent {
 }
 
 func (p *Process) XLog() xlog.XLog {
-	return mdbxlog.MDBXLog{}
+	return mongodbxlog.XLog{}
 }
 
 func (p *Process) reconfigure(config *state.Config) error {
@@ -199,7 +193,7 @@ func (p *Process) reconfigure(config *state.Config) error {
 
 		// If we're already running and it's just a change from async to sync with the same node, we don't need to restart
 		if p.configApplied && p.running() && p.config() != nil && config != nil &&
-			p.config().Role == state.RoleAsync && config.Role == state.RoleSync && config.Upstream.Meta["MYSQL_ID"] == p.config().Upstream.Meta["MYSQL_ID"] {
+			p.config().Role == state.RoleAsync && config.Role == state.RoleSync && config.Upstream.Meta["MONGODB_ID"] == p.config().Upstream.Meta["MONGODB_ID"] {
 			logger.Info("nothing to do", "reason", "becoming sync with same upstream")
 			return nil
 		}
@@ -254,7 +248,7 @@ func (p *Process) assumePrimary(downstream *discoverd.Instance) (err error) {
 		panic(fmt.Sprintf("unexpected state running role=%s", p.config().Role))
 	}
 
-	if err := p.writeConfig(configData{ReadOnly: downstream != nil}); err != nil {
+	if err := p.writeConfig(configData{ /*ReadOnly: downstream != nil*/ }); err != nil {
 		logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
 		return err
 	}
@@ -282,6 +276,7 @@ func (p *Process) assumePrimary(downstream *discoverd.Instance) (err error) {
 	return nil
 }
 
+/*
 // Backup returns a reader for streaming a backup in xbstream format.
 func (p *Process) Backup() (io.ReadCloser, error) {
 	r := &backupReadCloser{}
@@ -378,17 +373,17 @@ func (p *Process) restoreApplyLog() error {
 	}
 	return nil
 }
-
+*/
 func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error {
 	logger := p.Logger.New("fn", "assumeStandby", "upstream", upstream.Addr)
 	logger.Info("starting up as standby")
 
-	if err := p.writeConfig(configData{ReadOnly: true}); err != nil {
+	if err := p.writeConfig(configData{ /*ReadOnly: true*/ }); err != nil {
 		logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
 		return err
 	}
 
-	var backupInfo *BackupInfo
+	/*var backupInfo *BackupInfo*/
 	if p.running() {
 		if err := p.stop(); err != nil {
 			return err
@@ -398,50 +393,52 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 			return err
 		}
 
-		if err := func() error {
-			logger.Info("retrieving backup")
-			resp, err := http.Get(fmt.Sprintf("http://%s/backup", httpAddr(upstream.Addr)))
-			if err != nil {
-				logger.Error("error connecting to upstream for backup", "err", err)
-				return err
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				logger.Error("error code returned from backup", "status_code", resp.StatusCode)
-				return err
-			}
-
-			hash := sha512.New()
-
-			logger.Info("restoring backup")
-			backupInfo, err = p.Restore(io.TeeReader(resp.Body, hash))
-			if err != nil {
-				logger.Error("error restoring backup", "err", err)
-				return err
-			}
-
-			// Close response and confirm backup from trailer.
-			if err := resp.Body.Close(); err != nil {
-				logger.Error("error closing backup body", "err", err)
-				return err
-			}
-
-			chk := hex.EncodeToString(hash.Sum(nil))
-			logger.Error("verifying backup checksum", "hash", chk)
-			if hdr := resp.Trailer.Get(backupChecksumTrailer); hdr != chk {
-				logger.Error("invalid backup checksum", "hash", chk)
-				return errors.New("invalid backup")
-			}
-
-			return nil
-		}(); err != nil {
-			if files, err := ioutil.ReadDir("/data"); err == nil {
-				for _, file := range files {
-					os.RemoveAll(filepath.Join("/data", file.Name()))
+		/*
+			if err := func() error {
+				logger.Info("retrieving backup")
+				resp, err := http.Get(fmt.Sprintf("http://%s/backup", httpAddr(upstream.Addr)))
+				if err != nil {
+					logger.Error("error connecting to upstream for backup", "err", err)
+					return err
 				}
+				defer resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					logger.Error("error code returned from backup", "status_code", resp.StatusCode)
+					return err
+				}
+
+				hash := sha512.New()
+
+				logger.Info("restoring backup")
+				backupInfo, err = p.Restore(io.TeeReader(resp.Body, hash))
+				if err != nil {
+					logger.Error("error restoring backup", "err", err)
+					return err
+				}
+
+				// Close response and confirm backup from trailer.
+				if err := resp.Body.Close(); err != nil {
+					logger.Error("error closing backup body", "err", err)
+					return err
+				}
+
+				chk := hex.EncodeToString(hash.Sum(nil))
+				logger.Error("verifying backup checksum", "hash", chk)
+				if hdr := resp.Trailer.Get(backupChecksumTrailer); hdr != chk {
+					logger.Error("invalid backup checksum", "hash", chk)
+					return errors.New("invalid backup")
+				}
+
+				return nil
+			}(); err != nil {
+				if files, err := ioutil.ReadDir("/data"); err == nil {
+					for _, file := range files {
+						os.RemoveAll(filepath.Join("/data", file.Name()))
+					}
+				}
+				return err
 			}
-			return err
-		}
+		*/
 	}
 
 	if err := p.start(); err != nil {
@@ -450,58 +447,58 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 
 	if err := func() error {
 		// Connect to local server and set up slave replication.
-		db, err := p.connectLocal()
+		session, err := p.connectLocal()
 		if err != nil {
-			logger.Error("error acquiring connection", "err", err)
+			logger.Error("error acquiring session", "err", err)
 			return err
 		}
-		defer db.Close()
+		defer session.Close()
 
-		// Stop the slave first before changing GTID & MASTER settings.
-		if _, err := db.Exec(`STOP SLAVE`); err != nil {
-			return err
-		}
-
-		// Install semi-sync slave plugin. Ignore error if already installed.
-		if _, err := db.Exec(`INSTALL PLUGIN rpl_semi_sync_slave SONAME 'semisync_slave.so'`); err != nil && MySQLErrorNumber(err) != 1968 {
-			logger.Error("error installing rpl_semi_sync_slave", "err", err)
-			return err
-		}
-
-		// Enable semi-synchronous on slave.
-		if _, err := db.Exec(`SET GLOBAL rpl_semi_sync_slave_enabled = 1`); err != nil {
-			return err
-		}
-
-		// Only update the GTID if we read from a backup.
-		if backupInfo != nil {
-			logger.Info("updating gtid_slave_pos", "gtid", backupInfo.GTID)
-			if _, err := db.Exec(fmt.Sprintf(`SET GLOBAL gtid_slave_pos = "%s";`, backupInfo.GTID)); err != nil {
-				logger.Error("error updating slave gtid")
+		/*
+			// Stop the slave first before changing GTID & MASTER settings.
+			if _, err := db.Exec(`STOP SLAVE`); err != nil {
 				return err
 			}
-		}
 
-		host, port, _ := net.SplitHostPort(upstream.Addr)
-		logger.Info("changing master", "host", host, "port", port)
-		if _, err := db.Exec(fmt.Sprintf("CHANGE MASTER TO MASTER_HOST='%s', MASTER_PORT=%s, MASTER_USER='flynn', MASTER_PASSWORD='%s', MASTER_CONNECT_RETRY=10, MASTER_USE_GTID=current_pos;", host, port, p.Password)); err != nil {
-			logger.Error("error changing master", "host", host, "port", port, "err", err)
-			return err
-		}
-		if _, err := db.Exec(`STOP SLAVE IO_THREAD`); err != nil {
-			logger.Error("error stopping slave io thread", "err", err)
-			return err
-		}
-		if _, err := db.Exec(`START SLAVE IO_THREAD`); err != nil {
-			logger.Error("error starting slave io thread", "err", err)
-			return err
-		}
+			// Enable semi-synchronous on slave.
+			if _, err := db.Exec(`SET GLOBAL rpl_semi_sync_slave_enabled = 1`); err != nil {
+				return err
+			}
+		*/
 
-		// Start slave.
-		logger.Info("starting slave")
-		if _, err := db.Exec(`START SLAVE`); err != nil {
-			return err
-		}
+		/*
+			// Only update the GTID if we read from a backup.
+			if backupInfo != nil {
+				logger.Info("updating gtid_slave_pos", "gtid", backupInfo.GTID)
+				if _, err := db.Exec(fmt.Sprintf(`SET GLOBAL gtid_slave_pos = "%s";`, backupInfo.GTID)); err != nil {
+					logger.Error("error updating slave gtid")
+					return err
+				}
+			}
+		*/
+
+		/*
+			host, port, _ := net.SplitHostPort(upstream.Addr)
+			logger.Info("changing master", "host", host, "port", port)
+			if _, err := db.Exec(fmt.Sprintf("CHANGE MASTER TO MASTER_HOST='%s', MASTER_PORT=%s, MASTER_USER='flynn', MASTER_PASSWORD='%s', MASTER_CONNECT_RETRY=10, MASTER_USE_GTID=current_pos;", host, port, p.Password)); err != nil {
+				logger.Error("error changing master", "host", host, "port", port, "err", err)
+				return err
+			}
+			if _, err := db.Exec(`STOP SLAVE IO_THREAD`); err != nil {
+				logger.Error("error stopping slave io thread", "err", err)
+				return err
+			}
+			if _, err := db.Exec(`START SLAVE IO_THREAD`); err != nil {
+				logger.Error("error starting slave io thread", "err", err)
+				return err
+			}
+
+			// Start slave.
+			logger.Info("starting slave")
+			if _, err := db.Exec(`START SLAVE`); err != nil {
+				return err
+			}
+		*/
 
 		return nil
 	}(); err != nil {
@@ -520,54 +517,51 @@ func (p *Process) initPrimaryDB() error {
 	logger := p.Logger.New("fn", "initPrimaryDB")
 	logger.Info("initializing primary database")
 
-	dsn := &DSN{
-		Host:    "127.0.0.1:" + p.Port,
-		User:    "root",
-		Timeout: p.OpTimeout,
+	// Initialize replica set through mongo CLI because mgo hangs otherwise.
+	cmd := exec.Command(filepath.Join(p.BinDir, "mongo"), "--eval", "rs.initiate()", "127.0.0.1:"+p.Port)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		logger.Error("error initializing replica set", "err", err, "out", string(output))
+		return err
 	}
 
-	db, err := sql.Open("mysql", dsn.String())
+	mgo.SetDebug(true) // TEMP(benbjohnson)
+
+	session, err := mgo.DialWithInfo(&mgo.DialInfo{
+		Addrs:   []string{"127.0.0.1:" + p.Port},
+		Direct:  true,
+		Timeout: p.OpTimeout,
+	})
 	if err != nil {
 		logger.Error("error acquiring connection", "err", err)
 		return err
 	}
-	defer db.Close()
+	defer session.Close()
 
-	if _, err := db.Exec(fmt.Sprintf(`CREATE USER 'flynn'@'%%' IDENTIFIED BY '%s'`, p.Password)); err != nil && MySQLErrorNumber(err) != 1396 {
-		logger.Error("error creating database user", "err", err)
-		return err
-	}
-	if _, err := db.Exec(`GRANT ALL ON *.* TO 'flynn'@'%' WITH GRANT OPTION`); err != nil {
-		logger.Error("error granting privileges", "err", err)
-		return err
-	}
-	if _, err := db.Exec(`INSTALL PLUGIN rpl_semi_sync_master SONAME 'semisync_master.so'`); err != nil && MySQLErrorNumber(err) != 1968 {
-		logger.Error("error installing rpl_semi_sync_master", "err", err)
-		return err
-	}
-	if _, err := db.Exec(`FLUSH PRIVILEGES`); err != nil {
-		logger.Error("error flushing privileges", "err", err)
-		return err
-	}
+	// if err := session.Run(bson.D{{"eval", "rs.initiate()"}}, nil); err != nil {
+	// 	return err
+	// }
 
 	// If we are running in Singleton mode we don't need to setup replication
 	if p.Singleton {
 		return nil
 	}
-	// Enable semi-sync replication on the master.
-	master_variables := map[string]string{
-		"rpl_semi_sync_master_wait_point":    "AFTER_SYNC",
-		"rpl_semi_sync_master_timeout":       "18446744073709551615",
-		"rpl_semi_sync_master_enabled":       "1",
-		"rpl_semi_sync_master_wait_no_slave": "1",
-	}
 
-	for v, val := range master_variables {
-		if _, err := db.Exec(fmt.Sprintf(`SET GLOBAL %s = %s`, v, val)); err != nil {
-			logger.Error("error setting system variable", "var", v, "val", val, "err", err)
-			return err
+	/*
+		// Enable semi-sync replication on the master.
+		master_variables := map[string]string{
+			"rpl_semi_sync_master_wait_point":    "AFTER_SYNC",
+			"rpl_semi_sync_master_timeout":       "18446744073709551615",
+			"rpl_semi_sync_master_enabled":       "1",
+			"rpl_semi_sync_master_wait_no_slave": "1",
 		}
-	}
+
+		for v, val := range master_variables {
+			if _, err := db.Exec(fmt.Sprintf(`SET GLOBAL %s = %s`, v, val)); err != nil {
+				logger.Error("error setting system variable", "var", v, "val", val, "err", err)
+				return err
+			}
+		}
+	*/
 
 	return nil
 }
@@ -614,16 +608,12 @@ func (p *Process) waitForUpstream(upstream *discoverd.Instance) error {
 	}
 }
 
-func (p *Process) connectLocal() (*sql.DB, error) {
-	dsn := p.DSN()
-	dsn.User = "root"
-	dsn.Password = ""
-
-	db, err := sql.Open("mysql", dsn.String())
+func (p *Process) connectLocal() (*mgo.Session, error) {
+	session, err := mgo.DialWithInfo(p.DialInfo())
 	if err != nil {
 		return nil, err
 	}
-	return db, nil
+	return session, nil
 }
 
 func (p *Process) start() error {
@@ -654,15 +644,19 @@ func (p *Process) start() error {
 		// Connect to server.
 		// Retry after sleep if an error occurs.
 		if err := func() error {
-			db, err := p.connectLocal()
+			session, err := mgo.DialWithInfo(&mgo.DialInfo{
+				Addrs:   []string{"127.0.0.1:" + p.Port},
+				Direct:  true,
+				Timeout: p.OpTimeout,
+			})
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer session.Close()
 
-			if _, err := db.Exec("SELECT 1"); err != nil {
-				return err
-			}
+			// if err := session.Ping(); err != nil {
+			// 	return err
+			// }
 
 			return nil
 		}(); err != nil {
@@ -674,19 +668,20 @@ func (p *Process) start() error {
 				}
 				return err
 			default:
-				logger.Debug("ignoring error connecting to mysql", "err", err)
+				logger.Debug("ignoring error connecting to mongodb", "err", err)
 				time.Sleep(checkInterval)
 				continue
 			}
 		}
 
+		logger.Debug("process started")
 		return nil
 	}
 }
 
 func (p *Process) stop() error {
 	logger := p.Logger.New("fn", "stop")
-	logger.Info("stopping mysql")
+	logger.Info("stopping mongodb")
 
 	p.cancelSyncWait()
 
@@ -734,37 +729,44 @@ func (p *Process) isReadWrite() (bool, error) {
 	if !p.running() {
 		return false, nil
 	}
-	db, err := p.connectLocal()
-	if err != nil {
-		return false, err
-	}
-	defer db.Close()
-	var readOnly string
-	if err := db.QueryRow("SELECT @@read_only").Scan(&readOnly); err != nil {
-		return false, err
-	}
-	if readOnly == "0" {
-		return true, nil
-	}
-	return false, nil
+	panic("FIXME(benbjohnson): isReadWrite()")
+
+	/*
+		db, err := p.connectLocal()
+		if err != nil {
+			return false, err
+		}
+		defer db.Close()
+		var readOnly string
+		if err := db.QueryRow("SELECT @@read_only").Scan(&readOnly); err != nil {
+			return false, err
+		}
+		if readOnly == "0" {
+			return true, nil
+		}
+		return false, nil
+	*/
 }
 
 func (p *Process) userExists() (bool, error) {
 	if !p.running() {
-		return false, errors.New("mariadb is not running")
+		return false, errors.New("mongod is not running")
 	}
 
-	db, err := p.connectLocal()
-	if err != nil {
-		return false, err
-	}
-	defer db.Close()
+	panic("FIXME(benbjohnson): userExists()")
+	/*
+		session, err := p.connectLocal()
+		if err != nil {
+			return false, err
+		}
+		defer session.Close()
 
-	var res sql.NullInt64
-	if err := db.QueryRow("SELECT 1 FROM mysql.user WHERE User='flynn'").Scan(&res); err != nil {
-		return false, err
-	}
-	return res.Valid, nil
+		var res sql.NullInt64
+		if err := db.QueryRow("SELECT 1 FROM mysql.user WHERE User='flynn'").Scan(&res); err != nil {
+			return false, err
+		}
+		return res.Valid, nil
+	*/
 }
 
 func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool) {
@@ -782,7 +784,7 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 		startTime := time.Now().UTC()
 		logger := p.Logger.New(
 			"fn", "waitForSync",
-			"sync_name", downstream.Meta["MYSQL_ID"],
+			"sync_name", downstream.Meta["MONGODB_ID"],
 			"start_time", log15.Lazy{func() time.Time { return startTime }},
 		)
 
@@ -815,11 +817,9 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 			logger.Info("master xlog", "gtid", masterXLog)
 
 			// Read downstream slave status.
-			slaveXLog, err := p.nodeXLogPosition(&DSN{
-				Host:     downstream.Addr,
-				User:     "flynn",
-				Password: p.Password,
-				Timeout:  p.OpTimeout,
+			slaveXLog, err := p.nodeXLogPosition(&mgo.DialInfo{
+				Addrs:   []string{downstream.Addr},
+				Timeout: p.OpTimeout,
 			})
 			if err != nil {
 				logger.Error("error reading slave xlog", "err", err)
@@ -833,7 +833,7 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 				continue
 			}
 
-			logger.Info("mysql slave xlog", "gtid", slaveXLog)
+			logger.Info("mongodb slave xlog", "gtid", slaveXLog)
 
 			elapsedTime := time.Since(startTime)
 			logger := logger.New(
@@ -870,49 +870,52 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 			}
 		}
 
-		if enableWrites {
-			db, err := p.connectLocal()
-			if err != nil {
-				logger.Error("error acquiring connection", "err", err)
-				return
+		/*
+			if enableWrites {
+				db, err := p.connectLocal()
+				if err != nil {
+					logger.Error("error acquiring connection", "err", err)
+					return
+				}
+				defer db.Close()
+				if _, err := db.Exec(`SET GLOBAL read_only = 0`); err != nil {
+					logger.Error("error setting database read/write", "err", err)
+					return
+				}
 			}
-			defer db.Close()
-			if _, err := db.Exec(`SET GLOBAL read_only = 0`); err != nil {
-				logger.Error("error setting database read/write", "err", err)
-				return
-			}
-		}
+		*/
 	}()
 }
 
-// DSN returns the data source name for connecting to the local process as the "flynn" user.
-func (p *Process) DSN() *DSN {
-	return &DSN{
-		Host:     "127.0.0.1:" + p.Port,
-		User:     "flynn",
-		Password: p.Password,
-		Timeout:  p.OpTimeout,
+// DialInfo returns dial info for connecting to the local process as the "flynn" user.
+func (p *Process) DialInfo() *mgo.DialInfo {
+	return &mgo.DialInfo{
+		Addrs:   []string{"127.0.0.1:" + p.Port},
+		Timeout: p.OpTimeout,
 	}
 }
 
 func (p *Process) XLogPosition() (xlog.Position, error) {
-	return p.nodeXLogPosition(p.DSN())
+	return p.nodeXLogPosition(p.DialInfo())
 }
 
 // XLogPosition returns the current XLogPosition of node specified by DSN.
-func (p *Process) nodeXLogPosition(dsn *DSN) (xlog.Position, error) {
-	db, err := sql.Open("mysql", dsn.String())
+func (p *Process) nodeXLogPosition(info *mgo.DialInfo) (xlog.Position, error) {
+	session, err := mgo.DialWithInfo(info)
 	if err != nil {
 		return p.XLog().Zero(), err
 	}
-	defer db.Close()
+	defer session.Close()
 
-	var gtid string
-	if err := db.QueryRow(`SELECT @@gtid_current_pos`).Scan(&gtid); err != nil {
-		return p.XLog().Zero(), err
+	time.Sleep(2 * time.Second)
+	var entry bson.M
+	if err := session.DB("local").C("oplog.rs").Find(nil).Sort("-ts").One(&entry); err != nil {
+		return p.XLog().Zero(), fmt.Errorf("find oplog.rs.ts error: %s", err)
 	}
-	return xlog.Position(gtid), nil
+	fmt.Printf("XLOG: %T\n", entry["ts"])
+	<-(chan struct{})(nil)
 
+	return xlog.Position(entry["ts"].(bson.MongoTimestamp)), nil
 }
 
 func (p *Process) runCmd(cmd *exec.Cmd) error {
@@ -949,15 +952,18 @@ storage:
     enabled: true
   engine: wiredTiger
 
-systemLog:
-  destination: file
-  logAppend: true
-  path: /var/log/mongodb/mongod.log
+#systemLog:
+#  destination: file
+#  path: {{.DataDir}}/mongod.log
+#  logAppend: true
 
 net:
   port: {{.Port}}
-  bindIp: 0.0.0.0
+
+#security:
+#  authorization: enabled
 
 replication:
+  replSetName: rs0
   enableMajorityReadConcern: true
 `[1:]))

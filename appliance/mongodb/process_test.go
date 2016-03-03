@@ -12,6 +12,7 @@ import (
 
 	. "github.com/flynn/flynn/Godeps/_workspace/src/github.com/flynn/go-check"
 	"github.com/flynn/flynn/Godeps/_workspace/src/gopkg.in/mgo.v2"
+	"github.com/flynn/flynn/Godeps/_workspace/src/gopkg.in/mgo.v2/bson"
 	"github.com/flynn/flynn/discoverd/client"
 	"github.com/flynn/flynn/pkg/attempt"
 	"github.com/flynn/flynn/pkg/sirenia/state"
@@ -20,11 +21,11 @@ import (
 // Hook gocheck up to the "go test" runner
 func Test(t *testing.T) { TestingT(t) }
 
-type MariaDBSuite struct{}
+type MongoDBSuite struct{}
 
-var _ = Suite(&MariaDBSuite{})
+var _ = Suite(&MongoDBSuite{})
 
-func (MariaDBSuite) TestSingletonPrimary(c *C) {
+func (MongoDBSuite) TestSingletonPrimary(c *C) {
 	p := NewProcess()
 	p.ID = "node1"
 	p.Singleton = true
@@ -40,9 +41,9 @@ func (MariaDBSuite) TestSingletonPrimary(c *C) {
 	c.Assert(err, IsNil)
 	defer p.Stop()
 
-	conn := connect(c, p, "")
-	_, err = conn.Exec("CREATE DATABASE test")
-	conn.Close()
+	session := connect(c, p, "")
+	/*_, err = session.Exec("CREATE DATABASE test")*/
+	session.Close()
 	c.Assert(err, IsNil)
 
 	err = p.Stop()
@@ -62,9 +63,9 @@ func (MariaDBSuite) TestSingletonPrimary(c *C) {
 	c.Assert(p.Start(), IsNil)
 	defer p.Stop()
 
-	conn = connect(c, p, "")
-	_, err = conn.Exec("CREATE DATABASE foo")
-	conn.Close()
+	session = connect(c, p, "")
+	/*_, err = session.Exec("CREATE DATABASE foo")*/
+	session.Close()
 	c.Assert(err, IsNil)
 
 	err = p.Stop()
@@ -76,21 +77,18 @@ func instance(p *Process) *discoverd.Instance {
 		ID:   p.ID,
 		Addr: fmt.Sprintf("127.0.0.1:%d", MustAtoi(p.Port)),
 		Meta: map[string]string{
-			"MYSQL_ID": p.ID,
+			"MONGODB_ID": p.ID,
 		},
 	}
 }
 
-func connect(c *C, p *Process, database string) *sql.DB {
-	dsn := DSN{
-		Host:     fmt.Sprintf("127.0.0.1:%d", MustAtoi(p.Port)),
-		User:     "root",
-		Password: "",
+func connect(c *C, p *Process, database string) *mgo.Session {
+	session, err := mgo.DialWithInfo(&mgo.DialInfo{
+		Addrs:    []string{fmt.Sprintf("127.0.0.1:%d", MustAtoi(p.Port))},
 		Database: database,
-	}
-	db, err := sql.Open("mysql", dsn.String())
+	})
 	c.Assert(err, IsNil)
-	return db
+	return session
 }
 
 func Config(role state.Role, upstream, downstream *Process) *state.Config {
@@ -110,54 +108,53 @@ var queryAttempts = attempt.Strategy{
 	Delay: 200 * time.Millisecond,
 }
 
-func assertDownstream(c *C, db *sql.DB, n int) {
-	var row struct {
-		ServerID int64
-		Host     string
-		Port     int64
-		MasterID int64
-	}
-	err := db.QueryRow("SHOW SLAVE HOSTS").Scan(
-		&row.ServerID,
-		&row.Host,
-		&row.Port,
-		&row.MasterID,
-	)
-	c.Assert(err, IsNil)
-	c.Assert(row.Host, Equals, fmt.Sprintf("node%d", n))
+func assertDownstream(c *C, session *mgo.Session, n int) {
+	panic("FIXME(benbjohnson): assertDownstream")
+	/*
+		var row struct {
+			ServerID int64
+			Host     string
+			Port     int64
+			MasterID int64
+		}
+		err := session.QueryRow("SHOW SLAVE HOSTS").Scan(
+			&row.ServerID,
+			&row.Host,
+			&row.Port,
+			&row.MasterID,
+		)
+		c.Assert(err, IsNil)
+		c.Assert(row.Host, Equals, fmt.Sprintf("node%d", n))
+	*/
 }
 
-func waitRow(c *C, db *sql.DB, n int) {
-	var res int64
+func waitRow(c *C, session *mgo.Session, n int) {
+	var doc Doc
 	err := queryAttempts.Run(func() error {
-		return db.QueryRow(fmt.Sprintf("SELECT id FROM test WHERE id = %d", n)).Scan(&res)
+		return session.DB("db0").C("test").Find(bson.M{"n": n}).One(&doc)
 	})
 	c.Assert(err, IsNil)
 }
 
-func createTable(c *C, db *sql.DB) {
-	_, err := db.Exec("CREATE TABLE test (id bigint PRIMARY KEY)")
-	c.Assert(err, IsNil)
-	insertRow(c, db, 1)
+func insertDoc(c *C, session *mgo.Session, n int) {
+	c.Assert(session.DB("db0").C("test").Insert(&Doc{N: n}), IsNil)
 }
 
-func insertRow(c *C, db *sql.DB, n int) {
-	_, err := db.Exec(fmt.Sprintf("INSERT INTO test (id) VALUES (%d)", n))
-	c.Assert(err, IsNil)
-}
-
-func waitReadWrite(c *C, db *sql.DB) {
-	var readOnly string
-	err := queryAttempts.Run(func() error {
-		if err := db.QueryRow("SELECT @@read_only").Scan(&readOnly); err != nil {
-			return err
-		}
-		if readOnly == "0" {
-			return nil
-		}
-		return fmt.Errorf("transaction readonly is %q", readOnly)
-	})
-	c.Assert(err, IsNil)
+func waitReadWrite(c *C, session *mgo.Session) {
+	panic("FIXME(benbjohnson): waitReadWrite")
+	/*
+		var readOnly string
+		err := queryAttempts.Run(func() error {
+			if err := session.QueryRow("SELECT @@read_only").Scan(&readOnly); err != nil {
+				return err
+			}
+			if readOnly == "0" {
+				return nil
+			}
+			return fmt.Errorf("transaction readonly is %q", readOnly)
+		})
+		c.Assert(err, IsNil)
+	*/
 }
 
 var syncAttempts = attempt.Strategy{
@@ -181,7 +178,7 @@ func waitReplSync(c *C, p *Process, n int) {
 	c.Assert(err, IsNil, Commentf("up:%s down:%s", p.ID, id))
 }
 
-func (MariaDBSuite) TestIntegration_TwoNodeSync(c *C) {
+func (MongoDBSuite) TestIntegration_TwoNodeSync(c *C) {
 	node1 := NewTestProcess(c, 1)
 	node2 := NewTestProcess(c, 2)
 
@@ -207,17 +204,17 @@ func (MariaDBSuite) TestIntegration_TwoNodeSync(c *C) {
 	waitReplSync(c, node1, 2)
 
 	// Write to the master.
-	db1 := connect(c, node1, "mysql")
+	db1 := connect(c, node1, "db0")
 	defer db1.Close()
-	createTable(c, db1)
+	insertDoc(c, db1, 1)
 
 	// Read from the slave.
-	db2 := connect(c, node2, "mysql")
+	db2 := connect(c, node2, "db0")
 	defer db2.Close()
 	waitRow(c, db2, 1)
 }
 
-func (MariaDBSuite) TestIntegration_FourNode(c *C) {
+func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	node1 := NewTestProcess(c, 1)
 	node2 := NewTestProcess(c, 2)
 	node3 := NewTestProcess(c, 3)
@@ -233,7 +230,7 @@ func (MariaDBSuite) TestIntegration_FourNode(c *C) {
 	defer srv1.Close()
 
 	// try to write to primary and make sure it's read-only
-	db1 := connect(c, node1, "mysql")
+	db1 := connect(c, node1, "db0")
 	defer db1.Close()
 
 	// Start a sync
@@ -261,23 +258,25 @@ func (MariaDBSuite) TestIntegration_FourNode(c *C) {
 	// make sure the sync is listed as sync and remote_write is enabled
 	assertDownstream(c, db1, 2)
 
-	var discard interface{}
-	var masterClients int
-	err = db1.QueryRow("SHOW STATUS LIKE 'rpl_semi_sync_master_clients'").Scan(&discard, &masterClients)
-	c.Assert(err, IsNil)
-	c.Assert(masterClients, Equals, 1)
+	/*
+		var discard interface{}
+		var masterClients int
+		err = db1.QueryRow("SHOW STATUS LIKE 'rpl_semi_sync_master_clients'").Scan(&discard, &masterClients)
+		c.Assert(err, IsNil)
+		c.Assert(masterClients, Equals, 1)
 
-	var masterStatus string
-	err = db1.QueryRow("SHOW STATUS LIKE 'rpl_semi_sync_master_status'").Scan(&discard, &masterStatus)
-	c.Assert(err, IsNil)
-	c.Assert(masterStatus, Equals, "ON")
+		var masterStatus string
+		err = db1.QueryRow("SHOW STATUS LIKE 'rpl_semi_sync_master_status'").Scan(&discard, &masterStatus)
+		c.Assert(err, IsNil)
+		c.Assert(masterStatus, Equals, "ON")
+	*/
 
 	// create a table and a row
-	createTable(c, db1)
+	insertDoc(c, db1, 1)
 	db1.Close()
 
 	// query the sync and see the database
-	db2 := connect(c, node2, "mysql")
+	db2 := connect(c, node2, "db0")
 	defer db2.Close()
 	waitRow(c, db2, 1)
 
@@ -293,7 +292,7 @@ func (MariaDBSuite) TestIntegration_FourNode(c *C) {
 	// check it catches up
 	waitReplSync(c, node2, 3)
 
-	db3 := connect(c, node3, "mysql")
+	db3 := connect(c, node3, "db0")
 	defer db3.Close()
 
 	// check that data replicated successfully
@@ -312,7 +311,7 @@ func (MariaDBSuite) TestIntegration_FourNode(c *C) {
 	// check it catches up
 	waitReplSync(c, node3, 4)
 
-	db4 := connect(c, node4, "mysql")
+	db4 := connect(c, node4, "db0")
 	defer db4.Close()
 
 	// check that data replicated successfully
@@ -335,7 +334,7 @@ func (MariaDBSuite) TestIntegration_FourNode(c *C) {
 	assertDownstream(c, db3, 4)
 
 	// write to primary and ensure data propagates to followers
-	insertRow(c, db2, 2)
+	insertDoc(c, db2, 2)
 	db2.Close()
 	waitRow(c, db3, 2)
 	waitRow(c, db4, 2)
@@ -350,10 +349,10 @@ func (MariaDBSuite) TestIntegration_FourNode(c *C) {
 	waitReplSync(c, node3, 4)
 	waitReadWrite(c, db3)
 	assertDownstream(c, db3, 4)
-	insertRow(c, db3, 3)
+	insertDoc(c, db3, 3)
 }
 
-func (MariaDBSuite) TestRemoveNodes(c *C) {
+func (MongoDBSuite) TestRemoveNodes(c *C) {
 	node1 := NewTestProcess(c, 1)
 	node2 := NewTestProcess(c, 2)
 	node3 := NewTestProcess(c, 3)
@@ -393,12 +392,12 @@ func (MariaDBSuite) TestRemoveNodes(c *C) {
 	defer srv4.Close()
 
 	// wait for cluster to come up
-	node1Conn := connect(c, node1, "mysql")
+	node1Conn := connect(c, node1, "db0")
 	defer node1Conn.Close()
-	db4 := connect(c, node4, "mysql")
+	db4 := connect(c, node4, "db0")
 	defer db4.Close()
 	waitReadWrite(c, node1Conn)
-	createTable(c, node1Conn)
+	insertDoc(c, node1Conn, 1)
 	waitRow(c, db4, 1)
 	db4.Close()
 
@@ -409,9 +408,9 @@ func (MariaDBSuite) TestRemoveNodes(c *C) {
 	c.Assert(err, IsNil)
 
 	// run query
-	db4 = connect(c, node4, "mysql")
+	db4 = connect(c, node4, "db0")
 	defer db4.Close()
-	insertRow(c, node1Conn, 2)
+	insertDoc(c, node1Conn, 2)
 	waitRow(c, db4, 2)
 	db4.Close()
 
@@ -421,8 +420,8 @@ func (MariaDBSuite) TestRemoveNodes(c *C) {
 	c.Assert(node4.Reconfigure(Config(state.RoleSync, node1, nil)), IsNil)
 
 	waitReadWrite(c, node1Conn)
-	insertRow(c, node1Conn, 3)
-	db4 = connect(c, node4, "mysql")
+	insertDoc(c, node1Conn, 3)
+	db4 = connect(c, node4, "db0")
 	defer db4.Close()
 	waitRow(c, db4, 3)
 }
@@ -477,4 +476,8 @@ func MustAtoi(s string) int {
 		panic(err)
 	}
 	return i
+}
+
+type Doc struct {
+	N int
 }
