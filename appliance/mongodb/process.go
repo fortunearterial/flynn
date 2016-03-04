@@ -373,7 +373,7 @@ func (p *Process) waitForUpstream(upstream *discoverd.Instance) error {
 		}
 		if err != nil {
 			logger.Error("error getting upstream status", "err", err)
-		} else if status.Database.Running && status.Database.XLog != "" && status.Database.UserExists {
+		} else if status.Database.Running && status.Database.XLog != "" /*&& status.Database.UserExists*/ { // FIXME(benbjohnson)
 			logger.Info("upstream is online")
 			return nil
 		}
@@ -387,8 +387,8 @@ func (p *Process) waitForUpstream(upstream *discoverd.Instance) error {
 	}
 }
 
-func (p *Process) connectLocal() (*mgo.Session, error) {
-	session, err := mgo.DialWithInfo(p.DialInfo())
+func (p *Process) connectLocal(db string) (*mgo.Session, error) {
+	session, err := mgo.DialWithInfo(p.DialInfo(db))
 	if err != nil {
 		return nil, err
 	}
@@ -432,10 +432,6 @@ func (p *Process) start() error {
 				return err
 			}
 			defer session.Close()
-
-			// if err := session.Ping(); err != nil {
-			// 	return err
-			// }
 
 			return nil
 		}(); err != nil {
@@ -508,23 +504,22 @@ func (p *Process) isReadWrite() (bool, error) {
 	if !p.running() {
 		return false, nil
 	}
-	panic("FIXME(benbjohnson): isReadWrite()")
 
-	/*
-		db, err := p.connectLocal()
-		if err != nil {
-			return false, err
-		}
-		defer db.Close()
-		var readOnly string
-		if err := db.QueryRow("SELECT @@read_only").Scan(&readOnly); err != nil {
-			return false, err
-		}
-		if readOnly == "0" {
-			return true, nil
-		}
-		return false, nil
-	*/
+	session, err := p.connectLocal("admin")
+	if err != nil {
+		return false, err
+	}
+	defer session.Close()
+
+	var entry struct {
+		Retval struct {
+			IsMaster bool `bson:"ismaster"`
+		} `bson:"retval"`
+	}
+	if err := session.Run(bson.D{{"eval", `db.isMaster()`}}, &entry); err != nil {
+		return false, err
+	}
+	return entry.Retval.IsMaster, nil
 }
 
 func (p *Process) userExists() (bool, error) {
@@ -532,23 +527,24 @@ func (p *Process) userExists() (bool, error) {
 		return false, errors.New("mongod is not running")
 	}
 
-	panic("FIXME(benbjohnson): userExists()")
-	/*
-		session, err := p.connectLocal()
-		if err != nil {
-			return false, err
-		}
-		defer session.Close()
+	session, err := p.connectLocal("admin")
+	if err != nil {
+		return false, err
+	}
+	defer session.Close()
 
-		var res sql.NullInt64
-		if err := db.QueryRow("SELECT 1 FROM mysql.user WHERE User='flynn'").Scan(&res); err != nil {
-			return false, err
-		}
-		return res.Valid, nil
-	*/
+	var entry struct {
+		Retval bson.M `bson:"retval"`
+	}
+	if err := session.Run(bson.D{{"eval", `db.getUser("flynn")`}}, &entry); err != nil {
+		return false, err
+	}
+	return entry.Retval != nil, nil
 }
 
 func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool) {
+	p.Logger.Debug("waiting for downstream sync")
+
 	stopCh := make(chan struct{})
 	doneCh := make(chan struct{})
 
@@ -652,15 +648,16 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 }
 
 // DialInfo returns dial info for connecting to the local process as the "flynn" user.
-func (p *Process) DialInfo() *mgo.DialInfo {
+func (p *Process) DialInfo(db string) *mgo.DialInfo {
 	return &mgo.DialInfo{
-		Addrs:   []string{"127.0.0.1:" + p.Port},
-		Timeout: p.OpTimeout,
+		Addrs:    []string{"127.0.0.1:" + p.Port},
+		Database: db,
+		Timeout:  p.OpTimeout,
 	}
 }
 
 func (p *Process) XLogPosition() (xlog.Position, error) {
-	return p.nodeXLogPosition(p.DialInfo())
+	return p.nodeXLogPosition(p.DialInfo("local"))
 }
 
 // XLogPosition returns the current XLogPosition of node specified by DSN.
@@ -671,15 +668,11 @@ func (p *Process) nodeXLogPosition(info *mgo.DialInfo) (xlog.Position, error) {
 	}
 	defer session.Close()
 
-	time.Sleep(2 * time.Second)
 	var entry bson.M
 	if err := session.DB("local").C("oplog.rs").Find(nil).Sort("-ts").One(&entry); err != nil {
 		return p.XLog().Zero(), fmt.Errorf("find oplog.rs.ts error: %s", err)
 	}
-	fmt.Printf("XLOG: %T\n", entry["ts"])
-	<-(chan struct{})(nil)
-
-	return xlog.Position(entry["ts"].(bson.MongoTimestamp)), nil
+	return xlog.Position(strconv.FormatInt(int64(entry["ts"].(bson.MongoTimestamp)), 10)), nil
 }
 
 func (p *Process) runCmd(cmd *exec.Cmd) error {
