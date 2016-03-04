@@ -25,6 +25,7 @@ import (
 )
 
 const (
+	DefaultHost        = "localhost"
 	DefaultPort        = "27017"
 	DefaultBinDir      = "/usr/bin"
 	DefaultDataDir     = "/data"
@@ -63,6 +64,7 @@ type Process struct {
 
 	ID           string
 	Singleton    bool
+	Host         string
 	Port         string
 	BinDir       string
 	DataDir      string
@@ -85,6 +87,7 @@ type Process struct {
 // NewProcess returns a new instance of Process.
 func NewProcess() *Process {
 	p := &Process{
+		Host:        DefaultHost,
 		Port:        DefaultPort,
 		BinDir:      DefaultBinDir,
 		DataDir:     DefaultDataDir,
@@ -253,11 +256,6 @@ func (p *Process) assumePrimary(downstream *discoverd.Instance) (err error) {
 		return err
 	}
 
-	// FIXME(benbjohnson): Initialize database?
-	// if err := p.installDB(); err != nil {
-	// 	return err
-	// }
-
 	if err := p.start(); err != nil {
 		return err
 	}
@@ -300,8 +298,38 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 		return err
 	}
 
+	// Add to primary's replica set.
+	if err := p.addToReplicaSet(upstream.Addr); err != nil {
+		return err
+	}
+
 	if downstream != nil {
 		p.waitForSync(downstream, false)
+	}
+
+	return nil
+}
+
+func (p *Process) addToReplicaSet(addr string) error {
+	logger := p.Logger.New("fn", "addToReplicaSet")
+	logger.Info("adding to replica set")
+
+	// Connect to upstream server.
+	session, err := mgo.DialWithInfo(&mgo.DialInfo{
+		Addrs:   []string{addr},
+		Timeout: p.OpTimeout,
+	})
+	if err != nil {
+		logger.Error("error acquiring connection", "err", err)
+		return err
+	}
+	defer session.Close()
+
+	// Add to replica set.
+	var result bson.M
+	if session.Run(bson.D{{"eval", fmt.Sprintf(`rs.add(%q)`, net.JoinHostPort(p.Host, p.Port))}}, &result); err != nil {
+		logger.Error("error adding to replica set", "err", err)
+		return err
 	}
 
 	return nil
@@ -313,7 +341,11 @@ func (p *Process) initPrimaryDB() error {
 	logger.Info("initializing primary database")
 
 	// Initialize replica set through mongo CLI because mgo hangs otherwise.
-	cmd := exec.Command(filepath.Join(p.BinDir, "mongo"), "--eval", "rs.initiate()", "127.0.0.1:"+p.Port)
+	cmd := exec.Command(filepath.Join(p.BinDir, "mongo"),
+		"--eval",
+		fmt.Sprintf(`rs.initiate({_id:'rs0', members: [{_id: 0, host : "%s"}]})`, net.JoinHostPort(p.Host, p.Port)),
+		"127.0.0.1:"+p.Port,
+	)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		logger.Error("error initializing replica set", "err", err, "out", string(output))
 		return err
@@ -566,6 +598,8 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 
 		prevSlaveXLog := p.XLog().Zero()
 		for {
+			logger.Debug("checking downstream sync")
+
 			// Check if "wait sync" has been canceled.
 			select {
 			case <-stopCh:

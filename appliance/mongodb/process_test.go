@@ -32,7 +32,6 @@ func (MongoDBSuite) TestSingletonPrimary(c *C) {
 	p.Password = "password"
 	p.DataDir = c.MkDir()
 	p.Port = "7500"
-	p.ServerID = 1
 	p.OpTimeout = 30 * time.Second
 	err := p.Reconfigure(&state.Config{Role: state.RolePrimary})
 	c.Assert(err, IsNil)
@@ -56,7 +55,6 @@ func (MongoDBSuite) TestSingletonPrimary(c *C) {
 	p.Password = "password"
 	p.DataDir = c.MkDir()
 	p.Port = "7500"
-	p.ServerID = 1
 	p.OpTimeout = 30 * time.Second
 	err = p.Reconfigure(&state.Config{Role: state.RolePrimary})
 	c.Assert(err, IsNil)
@@ -86,6 +84,7 @@ func connect(c *C, p *Process, database string) *mgo.Session {
 	session, err := mgo.DialWithInfo(&mgo.DialInfo{
 		Addrs:    []string{fmt.Sprintf("127.0.0.1:%d", MustAtoi(p.Port))},
 		Database: database,
+		// Direct:   true,
 	})
 	c.Assert(err, IsNil)
 	return session
@@ -129,9 +128,14 @@ func assertDownstream(c *C, session *mgo.Session, n int) {
 }
 
 func waitRow(c *C, session *mgo.Session, n int) {
-	var doc Doc
 	err := queryAttempts.Run(func() error {
-		return session.DB("db0").C("test").Find(bson.M{"n": n}).One(&doc)
+		var doc Doc
+		if err := session.DB("db0").C("test").Find(bson.M{"n": n}).One(&doc); err != nil {
+			return err
+		} else if doc.N != n {
+			return fmt.Errorf("row n mismatch: %d != %d", n, doc.N)
+		}
+		return nil
 	})
 	c.Assert(err, IsNil)
 }
@@ -435,7 +439,6 @@ func NewTestProcess(c *C, n uint32) *Process {
 	p.DataDir = c.MkDir()
 	p.Port = strconv.Itoa(int(atomic.AddUint32(&newPort, 2)))
 	p.Password = "password"
-	p.ServerID = uint32(n)
 	p.OpTimeout = 30 * time.Second
 	p.Logger = p.Logger.New("id", p.ID, "port", p.Port)
 	return p
@@ -479,5 +482,5 @@ func MustAtoi(s string) int {
 }
 
 type Doc struct {
-	N int
+	N int `bson:"n"`
 }
