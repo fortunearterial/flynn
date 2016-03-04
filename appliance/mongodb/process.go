@@ -276,104 +276,6 @@ func (p *Process) assumePrimary(downstream *discoverd.Instance) (err error) {
 	return nil
 }
 
-/*
-// Backup returns a reader for streaming a backup in xbstream format.
-func (p *Process) Backup() (io.ReadCloser, error) {
-	r := &backupReadCloser{}
-
-	cmd := exec.Command(
-		filepath.Join(p.BinDir, "innobackupex"),
-		"--defaults-file="+p.ConfigPath(),
-		"--host=127.0.0.1",
-		"--port="+p.Port,
-		"--user=flynn",
-		"--password="+p.Password,
-		"--socket=",
-		"--stream=xbstream",
-		".",
-	)
-	cmd.Dir = p.DataDir
-	cmd.Stderr = os.Stderr
-	cmd.Stderr = &r.stderr
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		stdout.Close()
-		return nil, err
-	}
-
-	// Attach to reader wrapper.
-	r.cmd = cmd
-	r.stdout = stdout
-
-	return r, nil
-}
-
-type BackupInfo struct {
-	LogFile string
-	LogPos  string
-	GTID    string
-}
-
-func (p *Process) extractBackupInfo() (*BackupInfo, error) {
-	buf, err := ioutil.ReadFile(filepath.Join(p.DataDir, "xtrabackup_binlog_info"))
-	if err != nil {
-		return nil, err
-	}
-	fields := strings.Fields(string(buf))
-	if len(fields) < 3 {
-		return nil, fmt.Errorf("malformed xtrabackup_binlog_info, len", len(fields))
-	}
-	return &BackupInfo{LogFile: fields[0], LogPos: fields[1], GTID: fields[2]}, nil
-}
-
-// Restore restores the database from an xbstream backup.
-func (p *Process) Restore(r io.Reader) (*BackupInfo, error) {
-	if err := p.writeConfig(configData{}); err != nil {
-		return nil, err
-	}
-	if err := p.unpackXbstream(r); err != nil {
-		return nil, err
-	}
-	backupInfo, err := p.extractBackupInfo()
-	if err != nil {
-		return nil, err
-	}
-	if err := p.restoreApplyLog(); err != nil {
-		return nil, err
-	}
-	return backupInfo, nil
-}
-
-func (p *Process) unpackXbstream(r io.Reader) error {
-	cmd := exec.Command(filepath.Join(p.BinDir, "xbstream"), "-x", "--directory="+p.DataDir)
-	cmd.Stdin = ioutil.NopCloser(r)
-
-	if buf, err := cmd.CombinedOutput(); err != nil {
-		p.Logger.Error("xbstream failed", "err", err, "output", string(buf))
-		return err
-	}
-
-	return nil
-}
-
-func (p *Process) restoreApplyLog() error {
-	cmd := exec.Command(
-		filepath.Join(p.BinDir, "innobackupex"),
-		"--defaults-file="+p.ConfigPath(),
-		"--apply-log",
-		p.DataDir,
-	)
-	if buf, err := cmd.CombinedOutput(); err != nil {
-		p.Logger.Error("innobackupex apply-log failed", "err", err, "output", string(buf))
-		return err
-	}
-	return nil
-}
-*/
 func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error {
 	logger := p.Logger.New("fn", "assumeStandby", "upstream", upstream.Addr)
 	logger.Info("starting up as standby")
@@ -392,116 +294,9 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 		if err := p.waitForUpstream(upstream); err != nil {
 			return err
 		}
-
-		/*
-			if err := func() error {
-				logger.Info("retrieving backup")
-				resp, err := http.Get(fmt.Sprintf("http://%s/backup", httpAddr(upstream.Addr)))
-				if err != nil {
-					logger.Error("error connecting to upstream for backup", "err", err)
-					return err
-				}
-				defer resp.Body.Close()
-				if resp.StatusCode != http.StatusOK {
-					logger.Error("error code returned from backup", "status_code", resp.StatusCode)
-					return err
-				}
-
-				hash := sha512.New()
-
-				logger.Info("restoring backup")
-				backupInfo, err = p.Restore(io.TeeReader(resp.Body, hash))
-				if err != nil {
-					logger.Error("error restoring backup", "err", err)
-					return err
-				}
-
-				// Close response and confirm backup from trailer.
-				if err := resp.Body.Close(); err != nil {
-					logger.Error("error closing backup body", "err", err)
-					return err
-				}
-
-				chk := hex.EncodeToString(hash.Sum(nil))
-				logger.Error("verifying backup checksum", "hash", chk)
-				if hdr := resp.Trailer.Get(backupChecksumTrailer); hdr != chk {
-					logger.Error("invalid backup checksum", "hash", chk)
-					return errors.New("invalid backup")
-				}
-
-				return nil
-			}(); err != nil {
-				if files, err := ioutil.ReadDir("/data"); err == nil {
-					for _, file := range files {
-						os.RemoveAll(filepath.Join("/data", file.Name()))
-					}
-				}
-				return err
-			}
-		*/
 	}
 
 	if err := p.start(); err != nil {
-		return err
-	}
-
-	if err := func() error {
-		// Connect to local server and set up slave replication.
-		session, err := p.connectLocal()
-		if err != nil {
-			logger.Error("error acquiring session", "err", err)
-			return err
-		}
-		defer session.Close()
-
-		/*
-			// Stop the slave first before changing GTID & MASTER settings.
-			if _, err := db.Exec(`STOP SLAVE`); err != nil {
-				return err
-			}
-
-			// Enable semi-synchronous on slave.
-			if _, err := db.Exec(`SET GLOBAL rpl_semi_sync_slave_enabled = 1`); err != nil {
-				return err
-			}
-		*/
-
-		/*
-			// Only update the GTID if we read from a backup.
-			if backupInfo != nil {
-				logger.Info("updating gtid_slave_pos", "gtid", backupInfo.GTID)
-				if _, err := db.Exec(fmt.Sprintf(`SET GLOBAL gtid_slave_pos = "%s";`, backupInfo.GTID)); err != nil {
-					logger.Error("error updating slave gtid")
-					return err
-				}
-			}
-		*/
-
-		/*
-			host, port, _ := net.SplitHostPort(upstream.Addr)
-			logger.Info("changing master", "host", host, "port", port)
-			if _, err := db.Exec(fmt.Sprintf("CHANGE MASTER TO MASTER_HOST='%s', MASTER_PORT=%s, MASTER_USER='flynn', MASTER_PASSWORD='%s', MASTER_CONNECT_RETRY=10, MASTER_USE_GTID=current_pos;", host, port, p.Password)); err != nil {
-				logger.Error("error changing master", "host", host, "port", port, "err", err)
-				return err
-			}
-			if _, err := db.Exec(`STOP SLAVE IO_THREAD`); err != nil {
-				logger.Error("error stopping slave io thread", "err", err)
-				return err
-			}
-			if _, err := db.Exec(`START SLAVE IO_THREAD`); err != nil {
-				logger.Error("error starting slave io thread", "err", err)
-				return err
-			}
-
-			// Start slave.
-			logger.Info("starting slave")
-			if _, err := db.Exec(`START SLAVE`); err != nil {
-				return err
-			}
-		*/
-
-		return nil
-	}(); err != nil {
 		return err
 	}
 
@@ -537,6 +332,7 @@ func (p *Process) initPrimaryDB() error {
 	}
 	defer session.Close()
 
+	// TODO(jpg): Perform initial replica set setup.
 	// if err := session.Run(bson.D{{"eval", "rs.initiate()"}}, nil); err != nil {
 	// 	return err
 	// }
@@ -545,23 +341,6 @@ func (p *Process) initPrimaryDB() error {
 	if p.Singleton {
 		return nil
 	}
-
-	/*
-		// Enable semi-sync replication on the master.
-		master_variables := map[string]string{
-			"rpl_semi_sync_master_wait_point":    "AFTER_SYNC",
-			"rpl_semi_sync_master_timeout":       "18446744073709551615",
-			"rpl_semi_sync_master_enabled":       "1",
-			"rpl_semi_sync_master_wait_no_slave": "1",
-		}
-
-		for v, val := range master_variables {
-			if _, err := db.Exec(fmt.Sprintf(`SET GLOBAL %s = %s`, v, val)); err != nil {
-				logger.Error("error setting system variable", "var", v, "val", val, "err", err)
-				return err
-			}
-		}
-	*/
 
 	return nil
 }
@@ -869,21 +648,6 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 			case <-time.After(checkInterval):
 			}
 		}
-
-		/*
-			if enableWrites {
-				db, err := p.connectLocal()
-				if err != nil {
-					logger.Error("error acquiring connection", "err", err)
-					return
-				}
-				defer db.Close()
-				if _, err := db.Exec(`SET GLOBAL read_only = 0`); err != nil {
-					logger.Error("error setting database read/write", "err", err)
-					return
-				}
-			}
-		*/
 	}()
 }
 
