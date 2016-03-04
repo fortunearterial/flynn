@@ -332,16 +332,14 @@ func (p *Process) initPrimaryDB() error {
 	}
 	defer session.Close()
 
+	// TODO(jpg) Create admin user "flynn" and assign appropriate database roles
+
 	// TODO(jpg): Perform initial replica set setup.
 	// if err := session.Run(bson.D{{"eval", "rs.initiate()"}}, nil); err != nil {
 	// 	return err
 	// }
 
-	// If we are running in Singleton mode we don't need to setup replication
-	if p.Singleton {
-		return nil
-	}
-
+	// TODO(jpg): restart the database with new configuration, enabling authentication
 	return nil
 }
 

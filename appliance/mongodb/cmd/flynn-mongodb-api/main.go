@@ -8,7 +8,6 @@ import (
 
 	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/julienschmidt/httprouter"
 	"github.com/flynn/flynn/Godeps/_workspace/src/gopkg.in/mgo.v2"
-	"github.com/flynn/flynn/appliance/mongodb"
 	"github.com/flynn/flynn/discoverd/client"
 	"github.com/flynn/flynn/pkg/httphelper"
 	"github.com/flynn/flynn/pkg/random"
@@ -16,7 +15,7 @@ import (
 	"github.com/flynn/flynn/pkg/shutdown"
 )
 
-var serviceName = os.Getenv("FLYNN_MYSQL")
+var serviceName = os.Getenv("FLYNN_MONGO")
 var serviceHost string
 
 func init() {
@@ -29,13 +28,10 @@ func init() {
 func main() {
 	defer shutdown.Exit()
 
-	dsn := &mongodb.DSN{
-		Host:     serviceHost + ":3306",
-		User:     "flynn",
-		Password: os.Getenv("MYSQL_PWD"),
-		Database: "mysql",
-	}
-	db, err := sql.Open("mysql", dsn.String())
+	db, err := mgo.DialWithInfo(&mgo.DialInfo{
+		Addrs:  []string{"127.0.0.1:27017"},
+		Direct: true,
+	})
 	api := &API{db}
 
 	router := httprouter.New()
@@ -60,40 +56,24 @@ func main() {
 }
 
 type API struct {
-	db *sql.DB
+	db *mgo.Session
 }
 
 func (a *API) createDatabase(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
 	username, password, database := random.Hex(16), random.Hex(16), random.Hex(16)
-
-	fmt.Printf(`CREATE USER '%s'@'%%' IDENTIFIED BY '%s'`, username, password)
-	if _, err := a.db.Exec(fmt.Sprintf(`CREATE USER '%s'@'%%' IDENTIFIED BY '%s'`, username, password)); err != nil {
-		httphelper.Error(w, err)
-		return
-	}
-	fmt.Printf(`CREATE DATABASE "%s"`, database)
-	if _, err := a.db.Exec(fmt.Sprintf(`CREATE DATABASE %s`, database)); err != nil {
-		a.db.Exec(fmt.Sprintf(`DROP USER "%s"`, username))
-		httphelper.Error(w, err)
-		return
-	}
-	fmt.Printf(`GRANT ALL ON %s.* TO '%s'@'%%'`, database, username)
-	if _, err := a.db.Exec(fmt.Sprintf(`GRANT ALL ON %s.* TO '%s'@'%%'`, database, username)); err != nil {
-		a.db.Exec(fmt.Sprintf(`DROP DATABASE "%s"`, database))
-		a.db.Exec(fmt.Sprintf(`DROP USER "%s"`, username))
-		httphelper.Error(w, err)
-		return
-	}
-
-	url := fmt.Sprintf("mysql://%s:%s@%s:3306/%s", username, password, serviceHost, database)
+	// TODO(jpg)
+	// Create a user
+	// Create a database
+	// Assign any required roles
+	url := fmt.Sprintf("mongo://%s:%s@%s:27017/%s", username, password, serviceHost, database)
 	httphelper.JSON(w, 200, resource.Resource{
 		ID: fmt.Sprintf("/databases/%s:%s", username, database),
 		Env: map[string]string{
-			"FLYNN_MYSQL":    serviceName,
-			"MYSQL_HOST":     serviceHost,
-			"MYSQL_USER":     username,
-			"MYSQL_PWD":      password,
-			"MYSQL_DATABASE": database,
+			"FLYNN_MONGO":    serviceName,
+			"MONGO_HOST":     serviceHost,
+			"MONGO_USER":     username,
+			"MONGO_PWD":      password,
+			"MONGO_DATABASE": database,
 			"DATABASE_URL":   url,
 		},
 	})
@@ -105,22 +85,15 @@ func (a *API) dropDatabase(w http.ResponseWriter, req *http.Request, _ httproute
 		httphelper.ValidationError(w, "id", "is invalid")
 		return
 	}
-
-	if _, err := a.db.Exec(fmt.Sprintf(`DROP DATABASE "%s"`, id[1])); err != nil {
-		httphelper.Error(w, err)
-		return
-	}
-
-	if _, err := a.db.Exec(fmt.Sprintf(`DROP USER "%s"`, id[0])); err != nil {
-		httphelper.Error(w, err)
-		return
-	}
+	//TODO(jpg)
+	// Delete database
+	// Delete user
 
 	w.WriteHeader(200)
 }
 
 func (a *API) ping(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	if _, err := a.db.Exec("SELECT 1"); err != nil {
+	if err := a.db.Ping(); err != nil {
 		httphelper.Error(w, err)
 		return
 	}
