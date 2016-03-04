@@ -115,7 +115,7 @@ func (p *Process) syncedDownstream() *discoverd.Instance {
 	return nil
 }
 
-func (p *Process) ConfigPath() string { return filepath.Join(p.DataDir, "my.cnf") }
+func (p *Process) ConfigPath() string { return filepath.Join(p.DataDir, "mongod.conf") }
 
 func (p *Process) Reconfigure(config *state.Config) error {
 	p.mtx.Lock()
@@ -729,12 +729,13 @@ func (p *Process) writeConfig(d configData) error {
 }
 
 type configData struct {
-	ID      string
-	Port    string
-	DataDir string
+	ID              string
+	Port            string
+	DataDir         string
+	SecurityEnabled bool
 }
 
-var configTemplate = template.Must(template.New("my.cnf").Parse(`
+var configTemplate = template.Must(template.New("mongod.conf").Parse(`
 storage:
   dbPath: {{.DataDir}}
   journal:
@@ -749,8 +750,10 @@ storage:
 net:
   port: {{.Port}}
 
-#security:
-#  authorization: enabled
+{{if .SecurityEnabled}}
+security:
+  authorization: enabled
+{{end}}
 
 replication:
   replSetName: rs0
