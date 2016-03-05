@@ -298,6 +298,12 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 		return err
 	}
 
+	// TODO(jpg): set replySyncFrom to pull from upstream rather
+	// than allowing it to default to all peers pulling from the
+	// primary node. Should improve performance some.
+
+	// TODO(jpg): This should happen on the primary on when it
+	// recieves a Reconfigure event instead.
 	// Add to primary's replica set.
 	if err := p.addToReplicaSet(upstream.Addr); err != nil {
 		return err
@@ -325,6 +331,8 @@ func (p *Process) addToReplicaSet(addr string) error {
 	}
 	defer session.Close()
 
+	// TODO(jpg): Instead of using the shell shortcuts we should
+	// build our own wrapper around replSetReconfig
 	// Add to replica set.
 	var result bson.M
 	if session.Run(bson.D{{"eval", fmt.Sprintf(`rs.add(%q)`, net.JoinHostPort(p.Host, p.Port))}}, &result); err != nil {
@@ -340,6 +348,7 @@ func (p *Process) initPrimaryDB() error {
 	logger := p.Logger.New("fn", "initPrimaryDB")
 	logger.Info("initializing primary database")
 
+	// TODO(jpg): Use replSetInitiate instead of CLI wrapper.
 	// Initialize replica set through mongo CLI because mgo hangs otherwise.
 	cmd := exec.Command(filepath.Join(p.BinDir, "mongo"),
 		"--eval",
@@ -701,6 +710,8 @@ func (p *Process) nodeXLogPosition(info *mgo.DialInfo) (xlog.Position, error) {
 	defer session.Close()
 
 	var entry bson.M
+	// TODO(jpg): Investigate if it's better to get this via the
+	// replica set status of if this is prefferred.
 	if err := session.DB("local").C("oplog.rs").Find(nil).Sort("-ts").One(&entry); err != nil {
 		return p.XLog().Zero(), fmt.Errorf("find oplog.rs.ts error: %s", err)
 	}
