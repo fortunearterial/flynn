@@ -175,8 +175,42 @@ func (p *Process) Ready() <-chan state.DatabaseEvent {
 	return p.events
 }
 
+func (p *Process) InfoUpdate(info *state.PeerInfo) {
+	if info.Role == state.RolePrimary && p.running() {
+		p.mtx.Lock()
+		defer p.mtx.Unlock()
+		// save the new target topology in case we fail
+		// to make it happen right now.
+		// that way we can implement something to try
+		// correct the topology later.
+		// get the current replica set configuration
+		err := p.getReplStatus()
+		if err != nil {
+			return // can't do anything here right now.
+			// instead we should prob trigger a timer
+			// or something to retry later.
+		}
+		// compare it to what we would update it to
+		// if it's different then process the update
+		// incrementing the replic set config version
+		err = p.setReplConfig()
+		if err != nil {
+			return
+		}
+		return
+	}
+}
+
 func (p *Process) XLog() xlog.XLog {
 	return mongodbxlog.XLog{}
+}
+
+func (p *Process) getReplStatus() error {
+	return nil
+}
+
+func (p *Process) setReplConfig() error {
+	return nil
 }
 
 func (p *Process) reconfigure(config *state.Config) error {
@@ -298,12 +332,10 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 		return err
 	}
 
-	// TODO(jpg): set replySyncFrom to pull from upstream rather
+	// TODO(jpg): setReplSyncFrom to pull from upstream rather
 	// than allowing it to default to all peers pulling from the
 	// primary node. Should improve performance some.
 
-	// TODO(jpg): This should happen on the primary on when it
-	// recieves a Reconfigure event instead.
 	// Add to primary's replica set.
 	if err := p.addToReplicaSet(upstream.Addr); err != nil {
 		return err
@@ -343,29 +375,28 @@ func (p *Process) addToReplicaSet(addr string) error {
 	return nil
 }
 
+type replSetMember struct {
+	ID   int    `bson:"_id"`
+	Host string `bson:"host"`
+}
+
+type replSetConfig struct {
+	ID      string          `bson:"_id"`
+	Version int             `bson:"version,omitempty"` // increment on update
+	Members []replSetMember `bson:"members"`
+}
+
 // initPrimaryDB initializes the local database with the correct users and plugins.
 func (p *Process) initPrimaryDB() error {
 	logger := p.Logger.New("fn", "initPrimaryDB")
 	logger.Info("initializing primary database")
-
-	// TODO(jpg): Use replSetInitiate instead of CLI wrapper.
-	// Initialize replica set through mongo CLI because mgo hangs otherwise.
-	cmd := exec.Command(filepath.Join(p.BinDir, "mongo"),
-		"--eval",
-		fmt.Sprintf(`rs.initiate({_id:'rs0', members: [{_id: 0, host : "%s"}]})`, net.JoinHostPort(p.Host, p.Port)),
-		"127.0.0.1:"+p.Port,
-	)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		logger.Error("error initializing replica set", "err", err, "out", string(output))
-		return err
-	}
 
 	mgo.SetDebug(true) // TEMP(benbjohnson)
 
 	session, err := mgo.DialWithInfo(&mgo.DialInfo{
 		Addrs:   []string{"127.0.0.1:" + p.Port},
 		Direct:  true,
-		Timeout: p.OpTimeout,
+		Timeout: 5 * time.Second,
 	})
 	if err != nil {
 		logger.Error("error acquiring connection", "err", err)
@@ -373,12 +404,35 @@ func (p *Process) initPrimaryDB() error {
 	}
 	defer session.Close()
 
-	// TODO(jpg) Create admin user "flynn" and assign appropriate database roles
+	session.SetMode(mgo.Monotonic, true)
 
-	// TODO(jpg): Perform initial replica set setup.
-	// if err := session.Run(bson.D{{"eval", "rs.initiate()"}}, nil); err != nil {
-	// 	return err
-	// }
+	var initiateResponse bson.M
+	err = session.Run(bson.M{
+		"replSetInitiate": replSetConfig{
+			ID:      "rs0",
+			Members: []replSetMember{{ID: 0, Host: p.addr()}},
+		},
+	}, &initiateResponse)
+	if err != nil {
+		logger.Error("error initialising replica set", "err", err)
+		return err
+	}
+
+	// TODO(jpg) this is broken because we need to disable replication while
+	// we setup the admin user. Needs to be done this way so we can set it
+	// up on each node and then use a Keyfile to auth the nodes internally.
+	time.Sleep(2 * time.Second)
+
+	var userResponse bson.M
+	err = session.DB("admin").Run(bson.D{
+		{"createUser", "flynn"},
+		{"pwd", p.Password},
+		{"roles", []string{"userAdminAnyDatabase"}},
+	}, &userResponse)
+	if err != nil {
+		logger.Error("error creating admin user", "err", err)
+		return err
+	}
 
 	// TODO(jpg): restart the database with new configuration, enabling authentication
 	return nil
@@ -387,6 +441,10 @@ func (p *Process) initPrimaryDB() error {
 // upstreamTimeout is of the order of the discoverd heartbeat to prevent
 // waiting for an upstream which has gone down.
 var upstreamTimeout = 10 * time.Second
+
+func (p *Process) addr() string {
+	return net.JoinHostPort(p.Host, p.Port)
+}
 
 func httpAddr(addr string) string {
 	host, p, _ := net.SplitHostPort(addr)
@@ -426,8 +484,8 @@ func (p *Process) waitForUpstream(upstream *discoverd.Instance) error {
 	}
 }
 
-func (p *Process) connectLocal(db string) (*mgo.Session, error) {
-	session, err := mgo.DialWithInfo(p.DialInfo(db))
+func (p *Process) connectLocal() (*mgo.Session, error) {
+	session, err := mgo.DialWithInfo(p.DialInfo())
 	if err != nil {
 		return nil, err
 	}
@@ -544,7 +602,7 @@ func (p *Process) isReadWrite() (bool, error) {
 		return false, nil
 	}
 
-	session, err := p.connectLocal("admin")
+	session, err := p.connectLocal()
 	if err != nil {
 		return false, err
 	}
@@ -566,7 +624,7 @@ func (p *Process) userExists() (bool, error) {
 		return false, errors.New("mongod is not running")
 	}
 
-	session, err := p.connectLocal("admin")
+	session, err := p.connectLocal()
 	if err != nil {
 		return false, err
 	}
@@ -575,7 +633,7 @@ func (p *Process) userExists() (bool, error) {
 	var entry struct {
 		Retval bson.M `bson:"retval"`
 	}
-	if err := session.Run(bson.D{{"eval", `db.getUser("flynn")`}}, &entry); err != nil {
+	if err := session.Run(bson.M{"usersInfo": bson.M{"user": "flynn", "db": "admin"}}, &entry); err != nil {
 		return false, err
 	}
 	return entry.Retval != nil, nil
@@ -689,16 +747,15 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 }
 
 // DialInfo returns dial info for connecting to the local process as the "flynn" user.
-func (p *Process) DialInfo(db string) *mgo.DialInfo {
+func (p *Process) DialInfo() *mgo.DialInfo {
 	return &mgo.DialInfo{
-		Addrs:    []string{"127.0.0.1:" + p.Port},
-		Database: db,
-		Timeout:  p.OpTimeout,
+		Addrs:   []string{p.addr()},
+		Timeout: p.OpTimeout,
 	}
 }
 
 func (p *Process) XLogPosition() (xlog.Position, error) {
-	return p.nodeXLogPosition(p.DialInfo("local"))
+	return p.nodeXLogPosition(p.DialInfo())
 }
 
 // XLogPosition returns the current XLogPosition of node specified by DSN.
@@ -753,7 +810,7 @@ storage:
     enabled: true
   engine: wiredTiger
 
-#systemLog:
+# systemLog:
 #  destination: file
 #  path: {{.DataDir}}/mongod.log
 #  logAppend: true

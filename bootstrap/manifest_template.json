@@ -368,6 +368,46 @@
     }
   },
   {
+    "id": "mongodb-password",
+    "action": "gen-random"
+  },
+  {
+    "id": "mongodb",
+    "app": {
+      "name": "mongodb",
+      "strategy": "sirenia",
+      "meta": {"flynn-system-app": "true"}
+    },
+    "action": "deploy-app",
+    "release": {
+      "env": {
+        "FLYNN_MONGO": "mongodb",
+        "MONGO_HOST": "leader.mongodb.discoverd",
+        "MONGO_USER": "flynn",
+        "MONGO_PWD": "{{ (index .StepData \"mongodb-password\").Data }}",
+        "SIRENIA_PROCESS": "mongodb"
+      },
+      "processes": {
+        "mongodb": {
+          "ports": [{"port": 27017, "proto": "tcp"}],
+          "cmd": ["mongodb"],
+          "service": "mongodb",
+          "env": {
+            "SINGLETON": "{{ .Singleton }}"
+          },
+          "data": true
+        }
+      }
+    },
+    "artifact": {
+      "type": "docker",
+      "uri": "$image_repository?name=flynn/mongodb&id=$image_id[mongodb]"
+    },
+    "processes": {
+      "mongodb": 3
+    }
+  },
+  {
     "id": "add-mysql-provider",
     "action": "add-provider",
     "name": "mysql",

@@ -277,6 +277,10 @@ func (p *Postgres) Ready() <-chan state.DatabaseEvent {
 	return p.events
 }
 
+func (p *Postgres) InfoUpdate(*state.PeerInfo) {
+	return
+}
+
 func (p *Postgres) reconfigure(config *state.Config) (err error) {
 	log := p.log.New("fn", "reconfigure")
 

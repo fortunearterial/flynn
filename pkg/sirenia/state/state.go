@@ -157,6 +157,11 @@ type Database interface {
 	// Ready returns a channel that returns a single event when the interface
 	// is ready.
 	Ready() <-chan DatabaseEvent
+
+	// InfoUpdate is a non-critical function that will be called whenever a new
+	// info update is stored. Can be useful when the underlying database needs
+	// to be more topology aware than simple Upstream/Downstream chaining.
+	InfoUpdate(*PeerInfo)
 }
 
 type Discoverd interface {
@@ -320,6 +325,7 @@ func (p *Peer) Info() *PeerInfo {
 
 func (p *Peer) setInfo(info PeerInfo) {
 	p.info.Store(&info)
+	p.db.InfoUpdate(&info)
 }
 
 func (p *Peer) setState(state *State) {

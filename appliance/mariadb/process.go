@@ -182,6 +182,8 @@ func (p *Process) Ready() <-chan state.DatabaseEvent {
 	return p.events
 }
 
+func (p *Process) InfoUpdate(*state.PeerInfo) { return }
+
 func (p *Process) XLog() xlog.XLog {
 	return mdbxlog.MDBXLog{}
 }
