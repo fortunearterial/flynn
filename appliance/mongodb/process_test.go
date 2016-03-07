@@ -84,7 +84,7 @@ func connect(c *C, p *Process, database string) *mgo.Session {
 	session, err := mgo.DialWithInfo(&mgo.DialInfo{
 		Addrs:    []string{fmt.Sprintf("127.0.0.1:%d", MustAtoi(p.Port))},
 		Database: database,
-		// Direct:   true,
+		Direct:   true,
 	})
 	c.Assert(err, IsNil)
 	return session
@@ -208,14 +208,15 @@ func (MongoDBSuite) TestIntegration_TwoNodeSync(c *C) {
 	waitReplSync(c, node1, 2)
 
 	// Write to the master.
-	db1 := connect(c, node1, "db0")
-	defer db1.Close()
-	insertDoc(c, db1, 1)
+	session1 := connect(c, node1, "db0")
+	defer session1.Close()
+	insertDoc(c, session1, 1)
 
 	// Read from the slave.
-	db2 := connect(c, node2, "db0")
-	defer db2.Close()
-	waitRow(c, db2, 1)
+	session2 := connect(c, node2, "db0")
+	session2.SetMode(mgo.Secondary, true)
+	defer session2.Close()
+	waitRow(c, session2, 1)
 }
 
 func (MongoDBSuite) TestIntegration_FourNode(c *C) {
