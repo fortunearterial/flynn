@@ -175,32 +175,6 @@ func (p *Process) Ready() <-chan state.DatabaseEvent {
 	return p.events
 }
 
-func (p *Process) InfoUpdate(info *state.PeerInfo) {
-	if info.Role == state.RolePrimary && p.running() {
-		p.mtx.Lock()
-		defer p.mtx.Unlock()
-		// save the new target topology in case we fail
-		// to make it happen right now.
-		// that way we can implement something to try
-		// correct the topology later.
-		// get the current replica set configuration
-		err := p.getReplStatus()
-		if err != nil {
-			return // can't do anything here right now.
-			// instead we should prob trigger a timer
-			// or something to retry later.
-		}
-		// compare it to what we would update it to
-		// if it's different then process the update
-		// incrementing the replic set config version
-		err = p.setReplConfig()
-		if err != nil {
-			return
-		}
-		return
-	}
-}
-
 func (p *Process) XLog() xlog.XLog {
 	return mongodbxlog.XLog{}
 }
@@ -228,6 +202,26 @@ func (p *Process) reconfigure(config *state.Config) error {
 			return nil
 		}
 
+		if config.Role == state.RolePrimary && p.running() {
+			// save the new target topology in case we fail
+			// to make it happen right now.
+			// that way we can implement something to try
+			// correct the topology later.
+			// get the current replica set configuration
+			err := p.getReplStatus()
+			if err != nil {
+				return err
+			}
+			// compare it to what we would update it to
+			// if it's different then process the update
+			// incrementing the replic set config version
+			err = p.setReplConfig()
+			if err != nil {
+				return err
+			}
+		}
+
+		// TODO(jpg): We never need to reconfigure if we are are just a secondary.
 		// If we're already running and it's just a change from async to sync with the same node, we don't need to restart
 		if p.configApplied && p.running() && p.config() != nil && config != nil &&
 			p.config().Role == state.RoleAsync && config.Role == state.RoleSync && config.Upstream.Meta["MONGODB_ID"] == p.config().Upstream.Meta["MONGODB_ID"] {
@@ -239,6 +233,7 @@ func (p *Process) reconfigure(config *state.Config) error {
 		p.cancelSyncWait()
 		p.syncedDownstreamValue.Store((*discoverd.Instance)(nil))
 
+		//TODO(jpg): We don't need to reconfigure on downstream change.
 		// If we're already running and this is only a downstream change, just wait for the new downstream to catch up
 		if p.running() && p.config().IsNewDownstream(config) {
 			logger.Info("downstream changed", "to", config.Downstream.Addr)
