@@ -202,7 +202,12 @@ func (p *Process) reconfigure(config *state.Config) error {
 			return nil
 		}
 
-		if config.Role == state.RolePrimary && p.running() {
+		if config != nil && config.Role == state.RolePrimary && p.running() {
+			// Update to node to priority zero.
+			if err := p.setReplSetMemberPriority(net.JoinHostPort(p.Host, p.Port), 1); err != nil {
+				return err
+			}
+
 			// save the new target topology in case we fail
 			// to make it happen right now.
 			// that way we can implement something to try
@@ -336,6 +341,11 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 		return err
 	}
 
+	// Update to node to priority zero.
+	if err := p.setReplSetMemberPriority(net.JoinHostPort(p.Host, p.Port), 0); err != nil {
+		return err
+	}
+
 	if downstream != nil {
 		p.waitForSync(downstream, false)
 	}
@@ -364,6 +374,60 @@ func (p *Process) addToReplicaSet(addr string) error {
 	var result bson.M
 	if session.Run(bson.D{{"eval", fmt.Sprintf(`rs.add(%q)`, net.JoinHostPort(p.Host, p.Port))}}, &result); err != nil {
 		logger.Error("error adding to replica set", "err", err)
+		return err
+	}
+
+	return nil
+}
+
+// setReplSetMemberPriority sets member with given host to a priority.
+// If priority is 1 then all other members are reset to zero.
+func (p *Process) setReplSetMemberPriority(addr string, priority int) error {
+	logger := p.Logger.New("fn", "setReplSetMemberPriority")
+	logger.Info("updating priority", "addr", addr, "priority", priority)
+
+	// Connect to upstream server.
+	session, err := mgo.DialWithInfo(&mgo.DialInfo{
+		Addrs:   []string{addr},
+		Timeout: p.OpTimeout,
+	})
+	if err != nil {
+		logger.Error("error acquiring connection", "err", err)
+		return err
+	}
+	session.SetMode(mgo.PrimaryPreferred, true)
+	defer session.Close()
+
+	// Retrieve replica set configuration.
+	var result struct {
+		Config bson.M `bson:"config"`
+	}
+	if session.Run(bson.D{{"replSetGetConfig", 1}}, &result); err != nil {
+		logger.Error("error retrieving replica set configuration", "err", err)
+		return err
+	}
+
+	// Update priorities on config.
+	for _, v := range result.Config["members"].([]interface{}) {
+		member := v.(bson.M)
+
+		// If the member is setting a zero priority then only set its priority.
+		// Otherwise set the member to 1 and all others to zero.
+		switch priority {
+		case 0:
+			member["priority"] = 0
+		default:
+			if member["host"] == addr {
+				member["priority"] = 1
+			} else {
+				member["priority"] = 0
+			}
+		}
+	}
+
+	// Set the node as priority zero to prevent re-election.
+	if session.Run(bson.D{{"replSetReconfig", result.Config}, {"force", true}}, nil); err != nil {
+		logger.Error("error updating replica set configuration", "err", err)
 		return err
 	}
 

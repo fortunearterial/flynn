@@ -107,24 +107,25 @@ var queryAttempts = attempt.Strategy{
 	Delay: 200 * time.Millisecond,
 }
 
-func assertDownstream(c *C, session *mgo.Session, n int) {
-	panic("FIXME(benbjohnson): assertDownstream")
-	/*
-		var row struct {
-			ServerID int64
-			Host     string
-			Port     int64
-			MasterID int64
-		}
-		err := session.QueryRow("SHOW SLAVE HOSTS").Scan(
-			&row.ServerID,
-			&row.Host,
-			&row.Port,
-			&row.MasterID,
-		)
+func assertDownstream(c *C, session *mgo.Session, downstream *Process) {
+	var entry struct {
+		Retval struct {
+			Members []struct {
+				Name string `bson:"name"`
+			} `bson:"members"`
+		} `bson:"retval"`
+	}
+	if err := session.Run(bson.D{{"eval", `rs.status()`}}, &entry); err != nil {
 		c.Assert(err, IsNil)
-		c.Assert(row.Host, Equals, fmt.Sprintf("node%d", n))
-	*/
+	}
+
+	var names []string
+	for _, member := range entry.Retval.Members {
+		if member.Name == downstream.Host+":"+downstream.Port {
+			return
+		}
+	}
+	c.Fatalf("downstream not in member list: %+v", names)
 }
 
 func waitRow(c *C, session *mgo.Session, n int) {
@@ -145,20 +146,21 @@ func insertDoc(c *C, session *mgo.Session, n int) {
 }
 
 func waitReadWrite(c *C, session *mgo.Session) {
-	panic("FIXME(benbjohnson): waitReadWrite")
-	/*
-		var readOnly string
-		err := queryAttempts.Run(func() error {
-			if err := session.QueryRow("SELECT @@read_only").Scan(&readOnly); err != nil {
-				return err
-			}
-			if readOnly == "0" {
-				return nil
-			}
-			return fmt.Errorf("transaction readonly is %q", readOnly)
-		})
-		c.Assert(err, IsNil)
-	*/
+	err := queryAttempts.Run(func() error {
+		var entry struct {
+			Retval struct {
+				IsMaster bool `bson:"ismaster"`
+			} `bson:"retval"`
+		}
+		if err := session.Run(bson.D{{"eval", `db.isMaster()`}}, &entry); err != nil {
+			return err
+		}
+		if !entry.Retval.IsMaster {
+			return errors.New("not master")
+		}
+		return nil
+	})
+	c.Assert(err, IsNil)
 }
 
 var syncAttempts = attempt.Strategy{
@@ -185,6 +187,8 @@ func waitReplSync(c *C, p *Process, n int) {
 func (MongoDBSuite) TestIntegration_TwoNodeSync(c *C) {
 	node1 := NewTestProcess(c, 1)
 	node2 := NewTestProcess(c, 2)
+
+	println("DBG?", node1 == nil)
 
 	// Start a primary.
 	err := node1.Reconfigure(Config(state.RolePrimary, nil, node2))
@@ -261,27 +265,14 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	}
 
 	// make sure the sync is listed as sync and remote_write is enabled
-	assertDownstream(c, db1, 2)
-
-	/*
-		var discard interface{}
-		var masterClients int
-		err = db1.QueryRow("SHOW STATUS LIKE 'rpl_semi_sync_master_clients'").Scan(&discard, &masterClients)
-		c.Assert(err, IsNil)
-		c.Assert(masterClients, Equals, 1)
-
-		var masterStatus string
-		err = db1.QueryRow("SHOW STATUS LIKE 'rpl_semi_sync_master_status'").Scan(&discard, &masterStatus)
-		c.Assert(err, IsNil)
-		c.Assert(masterStatus, Equals, "ON")
-	*/
+	assertDownstream(c, db1, node2)
 
 	// create a table and a row
 	insertDoc(c, db1, 1)
-	db1.Close()
 
 	// query the sync and see the database
 	db2 := connect(c, node2, "db0")
+	db2.SetMode(mgo.Secondary, true)
 	defer db2.Close()
 	waitRow(c, db2, 1)
 
@@ -298,11 +289,12 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	waitReplSync(c, node2, 3)
 
 	db3 := connect(c, node3, "db0")
+	db3.SetMode(mgo.Secondary, true)
 	defer db3.Close()
 
 	// check that data replicated successfully
 	waitRow(c, db3, 1)
-	assertDownstream(c, db2, 3)
+	assertDownstream(c, db1, node3)
 
 	// Start a second async
 	err = node4.Reconfigure(Config(state.RoleAsync, node3, nil))
@@ -317,11 +309,12 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	waitReplSync(c, node3, 4)
 
 	db4 := connect(c, node4, "db0")
+	db4.SetMode(mgo.Secondary, true)
 	defer db4.Close()
 
 	// check that data replicated successfully
 	waitRow(c, db4, 1)
-	assertDownstream(c, db3, 4)
+	assertDownstream(c, db1, node4)
 
 	// promote node2 to primary
 	c.Assert(node1.Stop(), IsNil)
@@ -330,18 +323,26 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	err = node3.Reconfigure(Config(state.RoleSync, node2, node4))
 	c.Assert(err, IsNil)
 
+	// Reconnect to node 2 as primary.
+	db2.Close()
+	db2 = connect(c, node2, "db0")
+	defer db2.Close()
+
 	// wait for recovery and read-write transactions to come up
 	waitReplSync(c, node2, 3)
 	waitReadWrite(c, db2)
 
 	// check replication of each node
-	assertDownstream(c, db2, 3)
-	assertDownstream(c, db3, 4)
+	assertDownstream(c, db2, node3)
+	assertDownstream(c, db2, node4)
 
 	// write to primary and ensure data propagates to followers
 	insertDoc(c, db2, 2)
 	db2.Close()
+
+	db3.SetMode(mgo.Secondary, true)
 	waitRow(c, db3, 2)
+	db4.SetMode(mgo.Secondary, true)
 	waitRow(c, db4, 2)
 
 	//  promote node3 to primary
@@ -350,10 +351,15 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	c.Assert(err, IsNil)
 	err = node4.Reconfigure(Config(state.RoleSync, node3, nil))
 
+	// Reconnect to node 3 as primary.
+	db3.Close()
+	db3 = connect(c, node3, "db0")
+	defer db3.Close()
+
 	// check replication
 	waitReplSync(c, node3, 4)
 	waitReadWrite(c, db3)
-	assertDownstream(c, db3, 4)
+	assertDownstream(c, db3, node4)
 	insertDoc(c, db3, 3)
 }
 
