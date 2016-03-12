@@ -9,6 +9,5 @@ type replSetMember struct {
 
 type replSetConfig struct {
 	ID      string          `bson:"_id"`
-	Version int             `bson:"version,omitempty"` // increment on update
 	Members []replSetMember `bson:"members"`
 }

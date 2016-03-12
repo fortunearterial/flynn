@@ -23,16 +23,16 @@ const (
 )
 
 func main() {
-	serviceName := os.Getenv("FLYNN_MYSQL")
+	serviceName := os.Getenv("FLYNN_MGO")
 	if serviceName == "" {
 		serviceName = "mongodb"
 	}
 	singleton := os.Getenv("SINGLETON") == "true"
-	password := os.Getenv("MYSQL_PWD")
+	password := os.Getenv("MONGO_PWD")
 	httpPort := os.Getenv("HTTP_PORT")
 	ip := os.Getenv("EXTERNAL_IP")
 	if httpPort == "" {
-		httpPort = "3307"
+		httpPort = "27018"
 	}
 	serverId := ip2id(net.ParseIP(ip))
 

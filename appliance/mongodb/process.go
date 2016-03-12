@@ -179,12 +179,55 @@ func (p *Process) XLog() xlog.XLog {
 	return mongodbxlog.XLog{}
 }
 
-func (p *Process) getReplStatus() error {
+func (p *Process) getReplConfig() (*replSetConfig, error) {
+	// Connect to local server.
+	session, err := p.connectLocal()
+	if err != nil {
+		return nil, err
+	}
+	defer session.Close()
+	session.SetMode(mgo.Monotonic, true)
+
+	// Retrieve replica set configuration.
+	var result struct {
+		Config replSetConfig `bson:"config"`
+	}
+	if session.Run(bson.D{{"replSetGetConfig", 1}}, &result); err != nil {
+		return nil, err
+	}
+	return &result.Config, nil
+}
+
+func (p *Process) setReplConfig(config replSetConfig) error {
+	// Connect to local server.
+	session, err := p.connectLocal()
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	session.SetMode(mgo.Monotonic, true)
+	if session.Run(bson.D{{"replSetReconfig", config}, {"force", true}}, nil); err != nil {
+		return err
+	}
 	return nil
 }
 
-func (p *Process) setReplConfig() error {
-	return nil
+func (p *Process) replSetConfigFromState(clusterState *state.State) replSetConfig {
+	//TODO(jpg): Investigate stable IDs, not sure if non-stable IDs will screw with MongoDB
+	members := []replSetMember{{ID: 0, Host: clusterState.Primary.Addr, Priority: 1}}
+	// If we aren't running in singleton mode add the other members.
+	if !p.Singleton {
+		members = append(members, replSetMember{ID: 1, Host: clusterState.Sync.Addr})
+		id := 2
+		for _, peer := range clusterState.Async {
+			members = append(members, replSetMember{ID: id, Host: peer.Addr})
+			id++
+		}
+	}
+	return replSetConfig{
+		ID:      "rs0",
+		Members: members,
+	}
 }
 
 func (p *Process) reconfigure(config *state.Config) error {
@@ -203,19 +246,9 @@ func (p *Process) reconfigure(config *state.Config) error {
 		}
 
 		if config != nil && config.Role == state.RolePrimary && p.running() {
-			// Update to node to priority zero.
-			if err := p.setReplSetMemberPriority(net.JoinHostPort(p.Host, p.Port), 1); err != nil {
-				return err
-			}
-
-			err := p.getReplStatus()
-			if err != nil {
-				return err
-			}
-			// compare it to what we would update it to
-			// if it's different then process the update
-			// incrementing the replic set config version
-			err = p.setReplConfig()
+			logger.Info("updating replica set configuration")
+			replSetNew := p.replSetConfigFromState(config.State)
+			err := p.setReplConfig(replSetNew)
 			if err != nil {
 				return err
 			}
@@ -245,8 +278,9 @@ func (p *Process) reconfigure(config *state.Config) error {
 			config = p.config()
 		}
 
+		logger.Info("assuming primary, state nil?", "state_nil", config.State == nil)
 		if config.Role == state.RolePrimary {
-			return p.assumePrimary(config.Downstream)
+			return p.assumePrimary(config.Downstream, config.State)
 		}
 
 		return p.assumeStandby(config.Upstream, config.Downstream)
@@ -261,7 +295,7 @@ func (p *Process) reconfigure(config *state.Config) error {
 	return nil
 }
 
-func (p *Process) assumePrimary(downstream *discoverd.Instance) (err error) {
+func (p *Process) assumePrimary(downstream *discoverd.Instance, clusterState *state.State) (err error) {
 	logger := p.Logger.New("fn", "assumePrimary")
 	if downstream != nil {
 		logger = logger.New("downstream", downstream.Addr)
@@ -280,7 +314,7 @@ func (p *Process) assumePrimary(downstream *discoverd.Instance) (err error) {
 		panic(fmt.Sprintf("unexpected state running role=%s", p.config().Role))
 	}
 
-	if err := p.writeConfig(configData{ /*ReadOnly: downstream != nil*/ }); err != nil {
+	if err := p.writeConfig(configData{ReplicationEnabled: true /*SecurityEnabled: true*/}); err != nil {
 		logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
 		return err
 	}
@@ -289,7 +323,7 @@ func (p *Process) assumePrimary(downstream *discoverd.Instance) (err error) {
 		return err
 	}
 
-	if err := p.initPrimaryDB(); err != nil {
+	if err := p.initPrimaryDB(clusterState); err != nil {
 		if e := p.stop(); err != nil {
 			logger.Debug("ignoring error stopping process", "err", e)
 		}
@@ -307,7 +341,7 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 	logger := p.Logger.New("fn", "assumeStandby", "upstream", upstream.Addr)
 	logger.Info("starting up as standby")
 
-	if err := p.writeConfig(configData{ /*ReadOnly: true*/ }); err != nil {
+	if err := p.writeConfig(configData{ReplicationEnabled: true}); err != nil {
 		logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
 		return err
 	}
@@ -318,26 +352,13 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 			return err
 		}
 	} else {
-		if err := p.waitForUpstream(upstream); err != nil {
-			return err
-		}
+
 	}
 
 	if err := p.start(); err != nil {
 		return err
 	}
-
-	// TODO(jpg): setReplSyncFrom to pull from upstream rather
-	// than allowing it to default to all peers pulling from the
-	// primary node. Should improve performance some.
-
-	// Add to primary's replica set.
-	if err := p.addToReplicaSet(upstream.Addr); err != nil {
-		return err
-	}
-
-	// Update to node to priority zero.
-	if err := p.setReplSetMemberPriority(net.JoinHostPort(p.Host, p.Port), 0); err != nil {
+	if err := p.waitForUpstream(upstream); err != nil {
 		return err
 	}
 
@@ -348,135 +369,151 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 	return nil
 }
 
-func (p *Process) addToReplicaSet(addr string) error {
-	logger := p.Logger.New("fn", "addToReplicaSet")
-	logger.Info("adding to replica set")
-
-	// Connect to upstream server.
-	session, err := mgo.DialWithInfo(&mgo.DialInfo{
-		Addrs:   []string{addr},
-		Timeout: p.OpTimeout,
-	})
-	if err != nil {
-		logger.Error("error acquiring connection", "err", err)
-		return err
-	}
-	defer session.Close()
-
-	// TODO(jpg): Instead of using the shell shortcuts we should
-	// build our own wrapper around replSetReconfig
-	// Add to replica set.
-	var result bson.M
-	if session.Run(bson.D{{"eval", fmt.Sprintf(`rs.add(%q)`, net.JoinHostPort(p.Host, p.Port))}}, &result); err != nil {
-		logger.Error("error adding to replica set", "err", err)
-		return err
-	}
-
-	return nil
-}
-
-// setReplSetMemberPriority sets member with given host to a priority.
-// If priority is 1 then all other members are reset to zero.
-func (p *Process) setReplSetMemberPriority(addr string, priority int) error {
-	logger := p.Logger.New("fn", "setReplSetMemberPriority")
-	logger.Info("updating priority", "addr", addr, "priority", priority)
-
-	// Connect to upstream server.
-	session, err := mgo.DialWithInfo(&mgo.DialInfo{
-		Addrs:   []string{addr},
-		Timeout: p.OpTimeout,
-	})
-	if err != nil {
-		logger.Error("error acquiring connection", "err", err)
-		return err
-	}
-	session.SetMode(mgo.PrimaryPreferred, true)
-	defer session.Close()
-
-	// Retrieve replica set configuration.
-	var result struct {
-		Config replSetConfig `bson:"config"`
-	}
-	if session.Run(bson.D{{"replSetGetConfig", 1}}, &result); err != nil {
-		logger.Error("error retrieving replica set configuration", "err", err)
-		return err
-	}
-
-	// Update priorities on config.
-	for _, member := range result.Config.Members {
-		// If the member is setting a zero priority then only set its priority.
-		// Otherwise set the member to 1 and all others to zero.
-		switch priority {
-		case 0:
-			member.Priority = 0
-		default:
-			if member.Host == addr {
-				member.Priority = 1
-			} else {
-				member.Priority = 0
-			}
-		}
-	}
-
-	// Set the node as priority zero to prevent re-election.
-	if session.Run(bson.D{{"replSetReconfig", result.Config}, {"force", true}}, nil); err != nil {
-		logger.Error("error updating replica set configuration", "err", err)
-		return err
-	}
-
-	return nil
-}
-
-// initPrimaryDB initializes the local database with the correct users and plugins.
-func (p *Process) initPrimaryDB() error {
-	logger := p.Logger.New("fn", "initPrimaryDB")
-	logger.Info("initializing primary database")
-
-	mgo.SetDebug(true) // TEMP(benbjohnson)
-
+func (p Process) isReplInitialised() (bool, error) {
 	session, err := mgo.DialWithInfo(&mgo.DialInfo{
 		Addrs:   []string{"127.0.0.1:" + p.Port},
 		Direct:  true,
 		Timeout: 5 * time.Second,
 	})
 	if err != nil {
-		logger.Error("error acquiring connection", "err", err)
+		return false, err
+	}
+	defer session.Close()
+
+	session.SetMode(mgo.Monotonic, true)
+	result := bson.M{}
+	if err := session.Run(bson.D{{"replSetGetStatus", 1}}, &result); err != nil {
+		if merr, ok := err.(*mgo.QueryError); ok && merr.Code == 94 {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (p Process) isUserCreated() (bool, error) {
+	session, err := mgo.DialWithInfo(&mgo.DialInfo{
+		Addrs:   []string{"127.0.0.1:" + p.Port},
+		Direct:  true,
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		return false, err
+	}
+	defer session.Close()
+
+	session.SetMode(mgo.Monotonic, true)
+
+	n, err := session.DB("system").C("users").Find("flynn").Count()
+	if err != nil {
+		if merr, ok := err.(*mgo.QueryError); ok && merr.Code == 13 {
+			return false, nil
+		}
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (p Process) createUser() error {
+	// create a new session
+	session, err := mgo.DialWithInfo(&mgo.DialInfo{
+		Addrs:   []string{"127.0.0.1:" + p.Port},
+		Direct:  true,
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+
+	session.SetMode(mgo.Monotonic, true)
+	// TODO(jpg): Do we need to do anything further to test for success?
+	var userResponse bson.M
+	return session.DB("admin").Run(bson.D{
+		{"createUser", "flynn"},
+		{"pwd", p.Password},
+		{"roles", []bson.M{{"role": "root", "db": "admin"}}},
+	}, &userResponse)
+}
+
+// initPrimaryDB initializes the local database with the correct users and plugins.
+func (p *Process) initPrimaryDB(clusterState *state.State) error {
+	logger := p.Logger.New("fn", "initPrimaryDB")
+	logger.Info("initializing primary database")
+
+	mgo.SetDebug(true) // TEMP(benbjohnson)
+
+	// check if admin user has been created
+	//created, err := p.isUserCreated()
+	//if err != nil {
+	//	return err
+	//}
+	// user doesn't exist yet
+	/*
+		if !created {
+			p.stop()
+			// we need to start the database with both replication and security disabled
+			if err := p.writeConfig(configData{}); err != nil {
+				logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
+				return err
+			}
+			p.start()
+			if err := p.createUser(); err != nil {
+				return err
+			}
+			p.stop()
+
+			if err := p.writeConfig(configData{ReplicationEnabled: true SecurityEnabled: true}); err != nil {
+				logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
+				return err
+			}
+			p.start()
+		}
+	*/
+	// check if replica set has been initialised
+	initialized, err := p.isReplInitialised()
+	if err != nil {
+		return err
+	}
+	if !initialized && clusterState != nil {
+		if err := p.replSetInitiate(clusterState); err != nil {
+			return err
+		}
+	}
+
+	// TODO(jpg): restart the database with new configuration, enabling authentication
+	return nil
+}
+
+func (p *Process) replSetInitiate(clusterState *state.State) error {
+	logger := p.Logger.New("fn", "replSetInitiate")
+	session, err := mgo.DialWithInfo(&mgo.DialInfo{
+		Addrs:   []string{"127.0.0.1:" + p.Port},
+		Direct:  true,
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
 		return err
 	}
 	defer session.Close()
 
 	session.SetMode(mgo.Monotonic, true)
 
-	var initiateResponse bson.M
-	err = session.Run(bson.M{
-		"replSetInitiate": replSetConfig{
-			ID:      "rs0",
-			Members: []replSetMember{{ID: 0, Host: p.addr(), Priority: 1}},
-		},
-	}, &initiateResponse)
-	if err != nil {
-		logger.Error("error initialising replica set", "err", err)
-		return err
+	for {
+		var initiateResponse bson.M
+		err := session.Run(bson.M{
+			"replSetInitiate": p.replSetConfigFromState(clusterState),
+		}, &initiateResponse)
+		if merr, ok := err.(*mgo.QueryError); ok && merr.Code == 74 {
+			logger.Info("not all peers present yet, waiting 5 seconds")
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		return nil
 	}
-
-	// TODO(jpg) this is broken because we need to disable replication while
-	// we setup the admin user. Needs to be done this way so we can set it
-	// up on each node and then use a Keyfile to auth the nodes internally.
-	time.Sleep(2 * time.Second)
-
-	var userResponse bson.M
-	err = session.DB("admin").Run(bson.D{
-		{"createUser", "flynn"},
-		{"pwd", p.Password},
-		{"roles", []string{"userAdminAnyDatabase"}},
-	}, &userResponse)
-	if err != nil {
-		logger.Error("error creating admin user", "err", err)
-		return err
-	}
-
-	// TODO(jpg): restart the database with new configuration, enabling authentication
-	return nil
 }
 
 // upstreamTimeout is of the order of the discoverd heartbeat to prevent
@@ -838,10 +875,11 @@ func (p *Process) writeConfig(d configData) error {
 }
 
 type configData struct {
-	ID              string
-	Port            string
-	DataDir         string
-	SecurityEnabled bool
+	ID                 string
+	Port               string
+	DataDir            string
+	SecurityEnabled    bool
+	ReplicationEnabled bool
 }
 
 var configTemplate = template.Must(template.New("mongod.conf").Parse(`
@@ -864,7 +902,9 @@ security:
   authorization: enabled
 {{end}}
 
+{{if .ReplicationEnabled}}
 replication:
   replSetName: rs0
   enableMajorityReadConcern: true
+{{end}}
 `[1:]))
