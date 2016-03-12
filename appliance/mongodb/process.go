@@ -208,11 +208,6 @@ func (p *Process) reconfigure(config *state.Config) error {
 				return err
 			}
 
-			// save the new target topology in case we fail
-			// to make it happen right now.
-			// that way we can implement something to try
-			// correct the topology later.
-			// get the current replica set configuration
 			err := p.getReplStatus()
 			if err != nil {
 				return err
@@ -400,7 +395,7 @@ func (p *Process) setReplSetMemberPriority(addr string, priority int) error {
 
 	// Retrieve replica set configuration.
 	var result struct {
-		Config bson.M `bson:"config"`
+		Config replSetConfig `bson:"config"`
 	}
 	if session.Run(bson.D{{"replSetGetConfig", 1}}, &result); err != nil {
 		logger.Error("error retrieving replica set configuration", "err", err)
@@ -408,19 +403,17 @@ func (p *Process) setReplSetMemberPriority(addr string, priority int) error {
 	}
 
 	// Update priorities on config.
-	for _, v := range result.Config["members"].([]interface{}) {
-		member := v.(bson.M)
-
+	for _, member := range result.Config.Members {
 		// If the member is setting a zero priority then only set its priority.
 		// Otherwise set the member to 1 and all others to zero.
 		switch priority {
 		case 0:
-			member["priority"] = 0
+			member.Priority = 0
 		default:
-			if member["host"] == addr {
-				member["priority"] = 1
+			if member.Host == addr {
+				member.Priority = 1
 			} else {
-				member["priority"] = 0
+				member.Priority = 0
 			}
 		}
 	}
@@ -432,17 +425,6 @@ func (p *Process) setReplSetMemberPriority(addr string, priority int) error {
 	}
 
 	return nil
-}
-
-type replSetMember struct {
-	ID   int    `bson:"_id"`
-	Host string `bson:"host"`
-}
-
-type replSetConfig struct {
-	ID      string          `bson:"_id"`
-	Version int             `bson:"version,omitempty"` // increment on update
-	Members []replSetMember `bson:"members"`
 }
 
 // initPrimaryDB initializes the local database with the correct users and plugins.
@@ -469,7 +451,7 @@ func (p *Process) initPrimaryDB() error {
 	err = session.Run(bson.M{
 		"replSetInitiate": replSetConfig{
 			ID:      "rs0",
-			Members: []replSetMember{{ID: 0, Host: p.addr()}},
+			Members: []replSetMember{{ID: 0, Host: p.addr(), Priority: 1}},
 		},
 	}, &initiateResponse)
 	if err != nil {
