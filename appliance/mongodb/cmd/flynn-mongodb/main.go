@@ -75,7 +75,7 @@ func main() {
 
 	dd := sd.NewDiscoverd(discoverd.DefaultClient.Service(serviceName), log.New("component", "discoverd"))
 
-	peer := state.NewPeer(inst, id, mongoIdKey, singleton, dd, process, log.New("component", "peer"))
+	peer := state.NewPeer(inst, id, mongoIdKey, singleton, dd, process, state.Flat, log.New("component", "peer"))
 	shutdown.BeforeExit(func() { peer.Close() })
 
 	go peer.Run()

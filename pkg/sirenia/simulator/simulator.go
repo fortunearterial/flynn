@@ -145,7 +145,7 @@ func (s *Simulator) createSimPeer() *simPeer {
 	ident := s.newPeerIdent("")
 	dd := s.discoverd.NewClient(ident)
 	db := s.db.NewClient(ident)
-	p := state.NewPeer(ident, ident.Meta[simIdKey], simIdKey, s.singleton, dd, db, s.log.New("component", "peer"))
+	p := state.NewPeer(ident, ident.Meta[simIdKey], simIdKey, s.singleton, dd, db, state.Chained, s.log.New("component", "peer"))
 	p.SetDebugChannels(s.restCh, s.retryCh)
 
 	return &simPeer{

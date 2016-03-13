@@ -25,6 +25,13 @@ import (
 	"github.com/flynn/flynn/pkg/sirenia/xlog"
 )
 
+type Topology int
+
+const (
+	Chained Topology = iota
+	Flat
+)
+
 type State struct {
 	Generation int                   `json:"generation"`
 	Freeze     *FreezeDetails        `json:"freeze,omitempty"`
@@ -224,6 +231,7 @@ type Peer struct {
 	idKey     string
 	self      *discoverd.Instance
 	singleton bool
+	topology  Topology
 
 	// External Interfaces
 	log       log15.Logger
@@ -252,12 +260,13 @@ type Peer struct {
 	closeOnce sync.Once
 }
 
-func NewPeer(self *discoverd.Instance, id string, idKey string, singleton bool, d Discoverd, db Database, log log15.Logger) *Peer {
+func NewPeer(self *discoverd.Instance, id string, idKey string, singleton bool, d Discoverd, db Database, topology Topology, log log15.Logger) *Peer {
 	p := &Peer{
 		id:          id,
 		idKey:       idKey,
 		self:        self,
 		singleton:   singleton,
+		topology:    topology,
 		db:          db,
 		discoverd:   d,
 		log:         log,
@@ -1079,7 +1088,14 @@ func (p *Peer) Config() *Config {
 	role := p.Info().Role
 	switch role {
 	case RolePrimary, RoleSync, RoleAsync:
-		return &Config{Role: role, Upstream: p.upstream, Downstream: p.downstream, State: p.Info().State}
+		switch p.topology {
+		case Chained:
+			return &Config{Role: role, Upstream: p.upstream, Downstream: p.downstream}
+		case Flat:
+			return &Config{Role: role, Upstream: p.upstream, Downstream: p.downstream, State: p.Info().State}
+		default:
+			panic(fmt.Sprintf("unexpected topology %v", p.topology))
+		}
 	case RoleUnassigned, RoleDeposed:
 		return &Config{Role: RoleNone}
 	default:
