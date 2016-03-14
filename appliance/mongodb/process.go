@@ -247,6 +247,7 @@ func (p *Process) reconfigure(config *state.Config) error {
 
 		if config != nil && config.Role == state.RolePrimary && p.running() {
 			logger.Info("updating replica set configuration")
+			// TODO(jpg): Need to get current replica set configuration version
 			replSetNew := p.replSetConfigFromState(config.State)
 			err := p.setReplConfig(replSetNew)
 			if err != nil {
@@ -499,21 +500,27 @@ func (p *Process) replSetInitiate(clusterState *state.State) error {
 
 	session.SetMode(mgo.Monotonic, true)
 
-	for {
-		var initiateResponse bson.M
-		err := session.Run(bson.M{
-			"replSetInitiate": p.replSetConfigFromState(clusterState),
-		}, &initiateResponse)
-		if merr, ok := err.(*mgo.QueryError); ok && merr.Code == 74 {
-			logger.Info("not all peers present yet, waiting 5 seconds")
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		return nil
+	logger.Info("initialising replica set")
+	var initiateResponse bson.M
+	err = session.Run(bson.M{
+		"replSetInitiate": replSetConfig{
+			ID:      "rs0",
+			Members: []replSetMember{{ID: 0, Host: p.addr(), Priority: 1}},
+			Version: 1,
+		},
+	}, &initiateResponse)
+	if err != nil {
+		logger.Error("failed to initialise replica set", "err", err)
+		return err
 	}
+	replSetNew := p.replSetConfigFromState(clusterState)
+	replSetNew.Version = 2
+	err = p.setReplConfig(replSetNew)
+	if err != nil {
+		logger.Error("failed to reconfigure replia set", "err", err)
+		return err
+	}
+	return nil
 }
 
 // upstreamTimeout is of the order of the discoverd heartbeat to prevent
