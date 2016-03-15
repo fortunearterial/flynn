@@ -57,7 +57,6 @@ func (MongoDBSuite) TestSingletonPrimary(c *C) {
 	p.DataDir = c.MkDir()
 	p.Port = "7500"
 	p.OpTimeout = 30 * time.Second
-	topology = &state.State{Primary: instance(p)}
 	err = p.Reconfigure(&state.Config{Role: state.RolePrimary, State: topology})
 	c.Assert(err, IsNil)
 	c.Assert(p.Start(), IsNil)
@@ -326,6 +325,11 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	assertDownstream(c, db1, node4)
 
 	// promote node2 to primary
+	topology = &state.State{
+		Primary: instance(node2),
+		Sync:    instance(node3),
+		Async:   []*discoverd.Instance{instance(node4)},
+	}
 	c.Assert(node1.Stop(), IsNil)
 	err = node2.Reconfigure(Config(state.RolePrimary, nil, node3, topology))
 	c.Assert(err, IsNil)
@@ -353,6 +357,11 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	waitRow(c, db3, 2)
 	db4.SetMode(mgo.Secondary, true)
 	waitRow(c, db4, 2)
+
+	topology = &state.State{
+		Primary: instance(node3),
+		Sync:    instance(node4),
+	}
 
 	//  promote node3 to primary
 	c.Assert(node2.Stop(), IsNil)

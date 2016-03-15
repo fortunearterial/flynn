@@ -245,16 +245,6 @@ func (p *Process) reconfigure(config *state.Config) error {
 			return nil
 		}
 
-		if config != nil && config.Role == state.RolePrimary && p.running() {
-			logger.Info("updating replica set configuration")
-			// TODO(jpg): Need to get current replica set configuration version
-			replSetNew := p.replSetConfigFromState(config.State)
-			err := p.setReplConfig(replSetNew)
-			if err != nil {
-				return err
-			}
-		}
-
 		// TODO(jpg): We never need to reconfigure if we are are just a secondary.
 		// If we're already running and it's just a change from async to sync with the same node, we don't need to restart
 		if p.configApplied && p.running() && p.config() != nil && config != nil &&
@@ -262,7 +252,6 @@ func (p *Process) reconfigure(config *state.Config) error {
 			logger.Info("nothing to do", "reason", "becoming sync with same upstream")
 			return nil
 		}
-
 		// Make sure that we don't keep waiting for replication sync while reconfiguring
 		p.cancelSyncWait()
 		p.syncedDownstreamValue.Store((*discoverd.Instance)(nil))
@@ -279,9 +268,20 @@ func (p *Process) reconfigure(config *state.Config) error {
 			config = p.config()
 		}
 
-		logger.Info("assuming primary, state nil?", "state_nil", config.State == nil)
 		if config.Role == state.RolePrimary {
-			return p.assumePrimary(config.Downstream, config.State)
+			if !p.running() {
+				return p.assumePrimary(config.Downstream, config.State)
+			} else {
+				logger.Info("updating replica set configuration")
+				// TODO(jpg): Need to get current replica set configuration version
+				replSetCurrent, err := p.getReplConfig()
+				if err != nil {
+					return err
+				}
+				replSetNew := p.replSetConfigFromState(config.State)
+				replSetNew.Version = replSetCurrent.Version + 1
+				return p.setReplConfig(replSetNew)
+			}
 		}
 
 		return p.assumeStandby(config.Upstream, config.Downstream)

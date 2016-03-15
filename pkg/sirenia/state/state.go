@@ -1007,7 +1007,9 @@ func (p *Peer) startUpdateAsyncs(newAsync []*discoverd.Instance) {
 		p.setState(p.updatingState)
 	}
 	p.updatingState = nil
-
+	if p.topology == Flat {
+		p.triggerApplyConfig()
+	}
 	p.triggerEval()
 }
 
