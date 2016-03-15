@@ -12,3 +12,11 @@ type replSetConfig struct {
 	Members []replSetMember `bson:"members"`
 	Version int
 }
+
+type replSetStatusMember struct {
+	Name string `bson:"name"`
+}
+
+type replSetStatus struct {
+	Members []replSetStatusMember `bson:"members"`
+}

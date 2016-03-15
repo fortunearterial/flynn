@@ -33,7 +33,8 @@ func (MongoDBSuite) TestSingletonPrimary(c *C) {
 	p.DataDir = c.MkDir()
 	p.Port = "7500"
 	p.OpTimeout = 30 * time.Second
-	err := p.Reconfigure(&state.Config{Role: state.RolePrimary})
+	topology := &state.State{Primary: instance(p)}
+	err := p.Reconfigure(&state.Config{Role: state.RolePrimary, State: topology})
 	c.Assert(err, IsNil)
 
 	err = p.Start()
@@ -56,7 +57,8 @@ func (MongoDBSuite) TestSingletonPrimary(c *C) {
 	p.DataDir = c.MkDir()
 	p.Port = "7500"
 	p.OpTimeout = 30 * time.Second
-	err = p.Reconfigure(&state.Config{Role: state.RolePrimary})
+	topology = &state.State{Primary: instance(p)}
+	err = p.Reconfigure(&state.Config{Role: state.RolePrimary, State: topology})
 	c.Assert(err, IsNil)
 	c.Assert(p.Start(), IsNil)
 	defer p.Stop()
@@ -90,8 +92,8 @@ func connect(c *C, p *Process, database string) *mgo.Session {
 	return session
 }
 
-func Config(role state.Role, upstream, downstream *Process) *state.Config {
-	c := &state.Config{Role: role}
+func Config(role state.Role, upstream, downstream *Process, topology *state.State) *state.Config {
+	c := &state.Config{Role: role, State: topology}
 	if upstream != nil {
 		c.Upstream = instance(upstream)
 	}
@@ -188,10 +190,11 @@ func (MongoDBSuite) TestIntegration_TwoNodeSync(c *C) {
 	node1 := NewTestProcess(c, 1)
 	node2 := NewTestProcess(c, 2)
 
+	topology := &state.State{Primary: instance(node1), Sync: instance(node2)}
 	println("DBG?", node1 == nil)
 
 	// Start a primary.
-	err := node1.Reconfigure(Config(state.RolePrimary, nil, node2))
+	err := node1.Reconfigure(Config(state.RolePrimary, nil, node2, topology))
 	c.Assert(err, IsNil)
 	c.Assert(node1.Start(), IsNil)
 	defer node1.Stop()
@@ -200,7 +203,7 @@ func (MongoDBSuite) TestIntegration_TwoNodeSync(c *C) {
 	defer srv1.Close()
 
 	// Start a sync
-	err = node2.Reconfigure(Config(state.RoleSync, node1, nil))
+	err = node2.Reconfigure(Config(state.RoleSync, node1, nil, topology))
 	c.Assert(err, IsNil)
 	c.Assert(node2.Start(), IsNil)
 	defer node2.Stop()
@@ -229,8 +232,14 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	node3 := NewTestProcess(c, 3)
 	node4 := NewTestProcess(c, 4)
 
+	topology := &state.State{
+		Primary: instance(node1),
+		Sync:    instance(node2),
+		Async:   []*discoverd.Instance{instance(node3), instance(node4)},
+	}
+
 	// Start a primary
-	err := node1.Reconfigure(Config(state.RolePrimary, nil, node2))
+	err := node1.Reconfigure(Config(state.RolePrimary, nil, node2, topology))
 	c.Assert(err, IsNil)
 	c.Assert(node1.Start(), IsNil)
 	defer node1.Stop()
@@ -243,7 +252,7 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	defer db1.Close()
 
 	// Start a sync
-	err = node2.Reconfigure(Config(state.RoleSync, node1, node3))
+	err = node2.Reconfigure(Config(state.RoleSync, node1, node3, topology))
 	c.Assert(err, IsNil)
 	c.Assert(node2.Start(), IsNil)
 	defer node2.Stop()
@@ -277,7 +286,7 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	waitRow(c, db2, 1)
 
 	// Start an async
-	err = node3.Reconfigure(Config(state.RoleAsync, node2, node4))
+	err = node3.Reconfigure(Config(state.RoleAsync, node2, node4, topology))
 	c.Assert(err, IsNil)
 	c.Assert(node3.Start(), IsNil)
 	defer node3.Stop()
@@ -297,7 +306,7 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	assertDownstream(c, db1, node3)
 
 	// Start a second async
-	err = node4.Reconfigure(Config(state.RoleAsync, node3, nil))
+	err = node4.Reconfigure(Config(state.RoleAsync, node3, nil, topology))
 	c.Assert(err, IsNil)
 	c.Assert(node4.Start(), IsNil)
 	defer node4.Stop()
@@ -318,9 +327,9 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 
 	// promote node2 to primary
 	c.Assert(node1.Stop(), IsNil)
-	err = node2.Reconfigure(Config(state.RolePrimary, nil, node3))
+	err = node2.Reconfigure(Config(state.RolePrimary, nil, node3, topology))
 	c.Assert(err, IsNil)
-	err = node3.Reconfigure(Config(state.RoleSync, node2, node4))
+	err = node3.Reconfigure(Config(state.RoleSync, node2, node4, topology))
 	c.Assert(err, IsNil)
 
 	// Reconnect to node 2 as primary.
@@ -347,9 +356,9 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 
 	//  promote node3 to primary
 	c.Assert(node2.Stop(), IsNil)
-	err = node3.Reconfigure(Config(state.RolePrimary, nil, node4))
+	err = node3.Reconfigure(Config(state.RolePrimary, nil, node4, topology))
 	c.Assert(err, IsNil)
-	err = node4.Reconfigure(Config(state.RoleSync, node3, nil))
+	err = node4.Reconfigure(Config(state.RoleSync, node3, nil, topology))
 
 	// Reconnect to node 3 as primary.
 	db3.Close()
@@ -369,8 +378,14 @@ func (MongoDBSuite) TestRemoveNodes(c *C) {
 	node3 := NewTestProcess(c, 3)
 	node4 := NewTestProcess(c, 4)
 
+	topology := &state.State{
+		Primary: instance(node1),
+		Sync:    instance(node2),
+		Async:   []*discoverd.Instance{instance(node3), instance(node4)},
+	}
+
 	// start a chain of four nodes
-	err := node1.Reconfigure(Config(state.RolePrimary, nil, node2))
+	err := node1.Reconfigure(Config(state.RolePrimary, nil, node2, topology))
 	c.Assert(err, IsNil)
 	c.Assert(node1.Start(), IsNil)
 	defer node1.Stop()
@@ -378,7 +393,7 @@ func (MongoDBSuite) TestRemoveNodes(c *C) {
 	srv1 := NewHTTPServer(c, node1)
 	defer srv1.Close()
 
-	err = node2.Reconfigure(Config(state.RoleSync, node1, nil))
+	err = node2.Reconfigure(Config(state.RoleSync, node1, nil, topology))
 	c.Assert(err, IsNil)
 	c.Assert(node2.Start(), IsNil)
 	defer node2.Stop()
@@ -386,7 +401,7 @@ func (MongoDBSuite) TestRemoveNodes(c *C) {
 	srv2 := NewHTTPServer(c, node2)
 	defer srv2.Close()
 
-	err = node3.Reconfigure(Config(state.RoleAsync, node2, nil))
+	err = node3.Reconfigure(Config(state.RoleAsync, node2, nil, topology))
 	c.Assert(err, IsNil)
 	c.Assert(node3.Start(), IsNil)
 	defer node3.Stop()
@@ -394,7 +409,7 @@ func (MongoDBSuite) TestRemoveNodes(c *C) {
 	srv3 := NewHTTPServer(c, node3)
 	defer srv3.Close()
 
-	err = node4.Reconfigure(Config(state.RoleAsync, node3, nil))
+	err = node4.Reconfigure(Config(state.RoleAsync, node3, nil, topology))
 	c.Assert(err, IsNil)
 	c.Assert(node4.Start(), IsNil)
 	defer node4.Stop()
@@ -415,7 +430,7 @@ func (MongoDBSuite) TestRemoveNodes(c *C) {
 	// remove first async
 	c.Assert(node3.Stop(), IsNil)
 	// reconfigure second async
-	err = node4.Reconfigure(Config(state.RoleAsync, node2, nil))
+	err = node4.Reconfigure(Config(state.RoleAsync, node2, nil, topology))
 	c.Assert(err, IsNil)
 
 	// run query
@@ -427,8 +442,8 @@ func (MongoDBSuite) TestRemoveNodes(c *C) {
 
 	// remove sync and promote node4 to sync
 	c.Assert(node2.Stop(), IsNil)
-	c.Assert(node1.Reconfigure(Config(state.RolePrimary, nil, node4)), IsNil)
-	c.Assert(node4.Reconfigure(Config(state.RoleSync, node1, nil)), IsNil)
+	c.Assert(node1.Reconfigure(Config(state.RolePrimary, nil, node4, topology)), IsNil)
+	c.Assert(node4.Reconfigure(Config(state.RoleSync, node1, nil, topology)), IsNil)
 
 	waitReadWrite(c, node1Conn)
 	insertDoc(c, node1Conn, 3)
