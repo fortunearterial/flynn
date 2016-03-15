@@ -370,20 +370,26 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 	return nil
 }
 
-func (p Process) isReplInitialised() (bool, error) {
+func (p Process) replSetGetStatus() (*replSetStatus, error) {
 	session, err := mgo.DialWithInfo(&mgo.DialInfo{
 		Addrs:   []string{"127.0.0.1:" + p.Port},
 		Direct:  true,
 		Timeout: 5 * time.Second,
 	})
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer session.Close()
 
 	session.SetMode(mgo.Monotonic, true)
-	result := bson.M{}
-	if err := session.Run(bson.D{{"replSetGetStatus", 1}}, &result); err != nil {
+	var status replSetStatus
+	err = session.Run(bson.D{{"replSetGetStatus", 1}}, &status)
+	return &status, err
+}
+
+func (p Process) isReplInitialised() (bool, error) {
+	_, err := p.replSetGetStatus()
+	if err != nil {
 		if merr, ok := err.(*mgo.QueryError); ok && merr.Code == 94 {
 			return false, nil
 		}
