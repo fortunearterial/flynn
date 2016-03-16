@@ -842,11 +842,36 @@ func (p *Process) DialInfo() *mgo.DialInfo {
 	return &mgo.DialInfo{
 		Addrs:   []string{p.addr()},
 		Timeout: p.OpTimeout,
+		Direct:  true,
 	}
 }
 
 func (p *Process) XLogPosition() (xlog.Position, error) {
-	return p.nodeXLogPosition(p.DialInfo())
+	session, err := mgo.DialWithInfo(&mgo.DialInfo{
+		Addrs:   []string{"127.0.0.1:" + p.Port},
+		Direct:  true,
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		return p.XLog().Zero(), err
+	}
+	defer session.Close()
+
+	switch p.config().Role {
+	case state.RolePrimary:
+		session.SetMode(mgo.Monotonic, true)
+	case state.RoleSync, state.RoleAsync:
+		session.SetMode(mgo.Secondary, true)
+	default:
+		panic(fmt.Sprintf("unknown role %s", p.config().Role))
+	}
+	var entry bson.M
+	// TODO(jpg): Investigate if it's better to get this via the
+	// replica set status of if this is prefferred.
+	if err := session.DB("local").C("oplog.rs").Find(nil).Sort("-ts").One(&entry); err != nil {
+		return p.XLog().Zero(), fmt.Errorf("find oplog.rs.ts error: %s", err)
+	}
+	return xlog.Position(strconv.FormatInt(int64(entry["ts"].(bson.MongoTimestamp)), 10)), nil
 }
 
 // XLogPosition returns the current XLogPosition of node specified by DSN.

@@ -1,9 +1,7 @@
 package xlog
 
 import (
-	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/flynn/flynn/pkg/sirenia/xlog"
 )
@@ -40,13 +38,7 @@ func parseXlog(x xlog.Position) (pos int64, err error) {
 	if x == "" {
 		return 0, nil
 	}
-	parts := strings.SplitN(string(x), "-", 3)
-	if len(parts) != 3 {
-		err = fmt.Errorf("malformed xlog position %q", x)
-		return
-	}
-
-	pos, err = strconv.ParseInt(parts[2], 10, 64)
+	pos, err = strconv.ParseInt(string(x), 10, 64)
 	if err != nil {
 		return 0, err
 	}
