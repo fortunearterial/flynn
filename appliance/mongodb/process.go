@@ -62,6 +62,8 @@ type Process struct {
 	runningValue          atomic.Value // bool
 	syncedDownstreamValue atomic.Value // *discoverd.Instance
 
+	securityEnabled bool
+
 	ID           string
 	Singleton    bool
 	Host         string
@@ -199,12 +201,12 @@ func (p *Process) getReplConfig() (*replSetConfig, error) {
 }
 
 func (p *Process) setReplConfig(config replSetConfig) error {
-	// Connect to local server.
-	session, err := p.connectLocal()
+	session, err := mgo.DialWithInfo(p.DialInfo())
 	if err != nil {
 		return err
 	}
 	defer session.Close()
+
 	session.SetMode(mgo.Monotonic, true)
 	if session.Run(bson.D{{"replSetReconfig", config}, {"force", true}}, nil); err != nil {
 		return err
@@ -368,7 +370,8 @@ func (p *Process) assumePrimary(downstream *discoverd.Instance, clusterState *st
 		panic(fmt.Sprintf("unexpected state running role=%s", p.config().Role))
 	}
 
-	if err := p.writeConfig(configData{ReplicationEnabled: true /*SecurityEnabled: true*/}); err != nil {
+	p.securityEnabled = false
+	if err := p.writeConfig(configData{}); err != nil {
 		logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
 		return err
 	}
@@ -395,6 +398,7 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 	logger := p.Logger.New("fn", "assumeStandby", "upstream", upstream.Addr)
 	logger.Info("starting up as standby")
 
+	p.securityEnabled = false
 	if err := p.writeConfig(configData{ReplicationEnabled: true}); err != nil {
 		logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
 		return err
@@ -426,20 +430,18 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 }
 
 func (p Process) replSetGetStatus() (*replSetStatus, error) {
-	session, err := mgo.DialWithInfo(&mgo.DialInfo{
-		Addrs:   []string{"127.0.0.1:" + p.Port},
-		Direct:  true,
-		Timeout: 5 * time.Second,
-	})
+	session, err := mgo.DialWithInfo(p.DialInfo())
 	if err != nil {
 		return nil, err
 	}
 	defer session.Close()
-
 	session.SetMode(mgo.Monotonic, true)
+
 	var status replSetStatus
-	err = session.Run(bson.D{{"replSetGetStatus", 1}}, &status)
-	return &status, err
+	if err := session.Run(bson.D{{"replSetGetStatus", 1}}, &status); err != nil {
+		return nil, err
+	}
+	return &status, nil
 }
 
 func (p Process) isReplInitialised() (bool, error) {
@@ -454,11 +456,7 @@ func (p Process) isReplInitialised() (bool, error) {
 }
 
 func (p Process) isUserCreated() (bool, error) {
-	session, err := mgo.DialWithInfo(&mgo.DialInfo{
-		Addrs:   []string{"127.0.0.1:" + p.Port},
-		Direct:  true,
-		Timeout: 5 * time.Second,
-	})
+	session, err := mgo.DialWithInfo(p.DialInfo())
 	if err != nil {
 		return false, err
 	}
@@ -478,24 +476,29 @@ func (p Process) isUserCreated() (bool, error) {
 
 func (p Process) createUser() error {
 	// create a new session
-	session, err := mgo.DialWithInfo(&mgo.DialInfo{
-		Addrs:   []string{"127.0.0.1:" + p.Port},
-		Direct:  true,
-		Timeout: 5 * time.Second,
-	})
+	session, err := mgo.DialWithInfo(p.DialInfo())
 	if err != nil {
 		return err
 	}
 	defer session.Close()
 
 	session.SetMode(mgo.Monotonic, true)
+
 	// TODO(jpg): Do we need to do anything further to test for success?
 	var userResponse bson.M
-	return session.DB("admin").Run(bson.D{
+	if err := session.DB("admin").Run(bson.D{
 		{"createUser", "flynn"},
 		{"pwd", p.Password},
 		{"roles", []bson.M{{"role": "root", "db": "admin"}}},
-	}, &userResponse)
+	}, &userResponse); err != nil {
+		return err
+	}
+
+	if err := session.DB("admin").Run(bson.D{{"eval", `db.runCommand({flush:1})`}}, nil); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // initPrimaryDB initializes the local database with the correct users and plugins.
@@ -503,35 +506,37 @@ func (p *Process) initPrimaryDB(clusterState *state.State) error {
 	logger := p.Logger.New("fn", "initPrimaryDB")
 	logger.Info("initializing primary database")
 
-	mgo.SetDebug(true) // TEMP(benbjohnson)
+	// mgo.SetDebug(true) // TEMP(benbjohnson)
 
 	// check if admin user has been created
-	//created, err := p.isUserCreated()
-	//if err != nil {
-	//	return err
-	//}
-	// user doesn't exist yet
-	/*
-		if !created {
-			p.stop()
-			// we need to start the database with both replication and security disabled
-			if err := p.writeConfig(configData{}); err != nil {
-				logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
-				return err
-			}
-			p.start()
-			if err := p.createUser(); err != nil {
-				return err
-			}
-			p.stop()
+	created, err := p.isUserCreated()
+	if err != nil {
+		return err
+	}
 
-			if err := p.writeConfig(configData{ReplicationEnabled: true SecurityEnabled: true}); err != nil {
-				logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
-				return err
-			}
-			p.start()
+	// user doesn't exist yet
+	if !created {
+		p.stop()
+		// we need to start the database with both replication and security disabled
+		p.securityEnabled = false
+		if err := p.writeConfig(configData{}); err != nil {
+			logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
+			return err
 		}
-	*/
+		p.start()
+		if err := p.createUser(); err != nil {
+			return err
+		}
+		p.stop()
+
+		p.securityEnabled = true
+		if err := p.writeConfig(configData{ReplicationEnabled: true}); err != nil {
+			logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
+			return err
+		}
+		p.start()
+	}
+
 	// check if replica set has been initialised
 	initialized, err := p.isReplInitialised()
 	if err != nil {
@@ -549,11 +554,7 @@ func (p *Process) initPrimaryDB(clusterState *state.State) error {
 
 func (p *Process) replSetInitiate(clusterState *state.State) error {
 	logger := p.Logger.New("fn", "replSetInitiate")
-	session, err := mgo.DialWithInfo(&mgo.DialInfo{
-		Addrs:   []string{"127.0.0.1:" + p.Port},
-		Direct:  true,
-		Timeout: 5 * time.Second,
-	})
+	session, err := mgo.DialWithInfo(p.DialInfo())
 	if err != nil {
 		return err
 	}
@@ -582,6 +583,8 @@ func (p *Process) replSetInitiate(clusterState *state.State) error {
 	err = p.setReplConfig(replSetNew)
 	if err != nil {
 		logger.Error("failed to reconfigure replia set", "err", err)
+		println("DBG: PASSWORD=", p.Password)
+		<-(chan struct{})(nil)
 		return err
 	}
 	return nil
@@ -669,11 +672,7 @@ func (p *Process) start() error {
 		// Connect to server.
 		// Retry after sleep if an error occurs.
 		if err := func() error {
-			session, err := mgo.DialWithInfo(&mgo.DialInfo{
-				Addrs:   []string{"127.0.0.1:" + p.Port},
-				Direct:  true,
-				Timeout: p.OpTimeout,
-			})
+			session, err := mgo.DialWithInfo(p.DialInfo())
 			if err != nil {
 				return err
 			}
@@ -841,8 +840,10 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 
 			// Read downstream slave status.
 			slaveXLog, err := p.nodeXLogPosition(&mgo.DialInfo{
-				Addrs:   []string{downstream.Addr},
-				Timeout: p.OpTimeout,
+				Addrs:    []string{downstream.Addr},
+				Username: "flynn",
+				Password: p.Password,
+				Timeout:  p.OpTimeout,
 			})
 			if err != nil {
 				logger.Error("error reading slave xlog", "err", err)
@@ -897,19 +898,22 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 
 // DialInfo returns dial info for connecting to the local process as the "flynn" user.
 func (p *Process) DialInfo() *mgo.DialInfo {
-	return &mgo.DialInfo{
+	info := &mgo.DialInfo{
 		Addrs:   []string{p.addr()},
 		Timeout: p.OpTimeout,
 		Direct:  true,
 	}
+
+	if p.securityEnabled {
+		info.Database = "admin"
+		info.Username = "flynn"
+		info.Password = p.Password
+	}
+	return info
 }
 
 func (p *Process) XLogPosition() (xlog.Position, error) {
-	session, err := mgo.DialWithInfo(&mgo.DialInfo{
-		Addrs:   []string{"127.0.0.1:" + p.Port},
-		Direct:  true,
-		Timeout: 5 * time.Second,
-	})
+	session, err := mgo.DialWithInfo(p.DialInfo())
 	if err != nil {
 		return p.XLog().Zero(), err
 	}
@@ -941,6 +945,7 @@ func (p *Process) nodeXLogPosition(info *mgo.DialInfo) (xlog.Position, error) {
 	defer session.Close()
 
 	var entry bson.M
+
 	// TODO(jpg): Investigate if it's better to get this via the
 	// replica set status of if this is prefferred.
 	if err := session.DB("local").C("oplog.rs").Find(nil).Sort("-ts").One(&entry); err != nil {
@@ -960,6 +965,7 @@ func (p *Process) writeConfig(d configData) error {
 	d.ID = p.ID
 	d.Port = p.Port
 	d.DataDir = p.DataDir
+	d.SecurityEnabled = p.securityEnabled
 
 	f, err := os.Create(p.ConfigPath())
 	if err != nil {

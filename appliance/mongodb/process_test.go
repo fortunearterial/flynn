@@ -190,7 +190,6 @@ func (MongoDBSuite) TestIntegration_TwoNodeSync(c *C) {
 	node2 := NewTestProcess(c, 2)
 
 	topology := &state.State{Primary: instance(node1), Sync: instance(node2)}
-	println("DBG?", node1 == nil)
 
 	// Start a primary.
 	err := node1.Reconfigure(Config(state.RolePrimary, nil, node2, topology))
