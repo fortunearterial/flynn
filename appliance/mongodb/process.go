@@ -212,21 +212,75 @@ func (p *Process) setReplConfig(config replSetConfig) error {
 	return nil
 }
 
-func (p *Process) replSetConfigFromState(clusterState *state.State) replSetConfig {
-	//TODO(jpg): Investigate stable IDs, not sure if non-stable IDs will screw with MongoDB
-	members := []replSetMember{{ID: 0, Host: clusterState.Primary.Addr, Priority: 1}}
-	// If we aren't running in singleton mode add the other members.
-	if !p.Singleton {
-		members = append(members, replSetMember{ID: 1, Host: clusterState.Sync.Addr})
-		id := 2
-		for _, peer := range clusterState.Async {
-			members = append(members, replSetMember{ID: id, Host: peer.Addr})
-			id++
+func clusterSize(clusterState *state.State) int {
+	if clusterState.Singleton {
+		return 1
+	}
+	return 2 + len(clusterState.Async)
+}
+
+func newMember(addr string, newState *state.State, curIds map[string]int, prio int) replSetMember {
+	maxId := clusterSize(newState)
+	var id int
+	// Keep previous ID if assigned, required for replSetReconfig
+	if i, ok := curIds[addr]; ok {
+		id = i
+	} else {
+		// Otherwise assign IDs starting from 0, skipping those in use.
+		for i := 0; i < maxId; i++ {
+			found := false
+			for _, id := range curIds {
+				if i == id {
+					found = true
+				}
+			}
+			if !found {
+				id = i
+				break
+			}
 		}
+	}
+	curIds[addr] = id // Reserve our newly allocated ID
+	return replSetMember{ID: id, Host: addr, Priority: prio}
+}
+
+func clusterAddrs(clusterState *state.State) []string {
+	addrs := []string{clusterState.Primary.Addr}
+	if clusterState.Singleton {
+		return addrs
+	}
+	addrs = append(addrs, clusterState.Sync.Addr)
+	for _, n := range clusterState.Async {
+		addrs = append(addrs, n.Addr)
+	}
+	return addrs
+}
+
+func (p *Process) replSetConfigFromState(current *replSetConfig, s *state.State) replSetConfig {
+	curIds := make(map[string]int, len(current.Members))
+	newAddrs := clusterAddrs(s)
+	// If any of the current peers are in the new config then preserve their IDs
+	for _, m := range current.Members {
+		for _, a := range newAddrs {
+			if m.Host == a {
+				curIds[m.Host] = m.ID
+				break
+			}
+		}
+	}
+	members := make([]replSetMember, 0, clusterSize(s))
+	members = append(members, newMember(s.Primary.Addr, s, curIds, 1))
+	// If we aren't running in singleton mode add the other members.
+	if !s.Singleton {
+		members = append(members, newMember(s.Sync.Addr, s, curIds, 0))
+	}
+	for _, peer := range s.Async {
+		members = append(members, newMember(peer.Addr, s, curIds, 0))
 	}
 	return replSetConfig{
 		ID:      "rs0",
 		Members: members,
+		Version: current.Version + 1,
 	}
 }
 
@@ -278,8 +332,7 @@ func (p *Process) reconfigure(config *state.Config) error {
 				if err != nil {
 					return err
 				}
-				replSetNew := p.replSetConfigFromState(config.State)
-				replSetNew.Version = replSetCurrent.Version + 1
+				replSetNew := p.replSetConfigFromState(replSetCurrent, config.State)
 				return p.setReplConfig(replSetNew)
 			}
 		}
@@ -349,6 +402,7 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 
 	/*var backupInfo *BackupInfo*/
 	if p.running() {
+		logger.Info("stopping database")
 		if err := p.stop(); err != nil {
 			return err
 		}
@@ -356,6 +410,7 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 
 	}
 
+	logger.Info("starting database")
 	if err := p.start(); err != nil {
 		return err
 	}
@@ -519,8 +574,11 @@ func (p *Process) replSetInitiate(clusterState *state.State) error {
 		logger.Error("failed to initialise replica set", "err", err)
 		return err
 	}
-	replSetNew := p.replSetConfigFromState(clusterState)
-	replSetNew.Version = 2
+	replSetCurrent, err := p.getReplConfig()
+	if err != nil {
+		return err
+	}
+	replSetNew := p.replSetConfigFromState(replSetCurrent, clusterState)
 	err = p.setReplConfig(replSetNew)
 	if err != nil {
 		logger.Error("failed to reconfigure replia set", "err", err)
