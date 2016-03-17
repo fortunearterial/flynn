@@ -368,6 +368,12 @@
     }
   },
   {
+    "id": "add-mysql-provider",
+    "action": "add-provider",
+    "name": "mysql",
+    "url": "http://mariadb-api.discoverd/databases"
+  },
+  {
     "id": "mongodb-password",
     "action": "gen-random"
   },
@@ -396,6 +402,10 @@
             "SINGLETON": "{{ .Singleton }}"
           },
           "data": true
+        },
+        "web": {
+          "ports": [{"port": 80, "proto": "tcp"}],
+          "cmd": ["api"]
         }
       }
     },
@@ -404,14 +414,15 @@
       "uri": "$image_repository?name=flynn/mongodb&id=$image_id[mongodb]"
     },
     "processes": {
-      "mongodb": 3
+      "mongodb": 3,
+      "web": 2
     }
   },
   {
-    "id": "add-mysql-provider",
+    "id": "add-mongodb-provider",
     "action": "add-provider",
-    "name": "mysql",
-    "url": "http://mariadb-api.discoverd/databases"
+    "name": "mongodb",
+    "url": "http://mongodb-api.discoverd/databases"
   },
   {
     "id": "blobstore",
@@ -732,6 +743,11 @@
     "id": "mariadb-wait",
     "action": "wait",
     "url": "http://mariadb-api.discoverd/ping"
+  },
+  {
+    "id": "mongodb-wait",
+    "action": "wait",
+    "url": "http://mongodb-api.discoverd/ping"
   },
   {
     "id": "blobstore-wait",

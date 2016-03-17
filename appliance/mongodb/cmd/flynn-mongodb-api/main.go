@@ -2,12 +2,14 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
 
 	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/julienschmidt/httprouter"
 	"github.com/flynn/flynn/Godeps/_workspace/src/gopkg.in/mgo.v2"
+	"github.com/flynn/flynn/Godeps/_workspace/src/gopkg.in/mgo.v2/bson"
 	"github.com/flynn/flynn/discoverd/client"
 	"github.com/flynn/flynn/pkg/httphelper"
 	"github.com/flynn/flynn/pkg/random"
@@ -28,11 +30,7 @@ func init() {
 func main() {
 	defer shutdown.Exit()
 
-	db, err := mgo.DialWithInfo(&mgo.DialInfo{
-		Addrs:  []string{"127.0.0.1:27017"},
-		Direct: true,
-	})
-	api := &API{db}
+	api := &API{}
 
 	router := httprouter.New()
 	router.POST("/databases", api.createDatabase)
@@ -55,15 +53,36 @@ func main() {
 	shutdown.Fatal(http.ListenAndServe(addr, handler))
 }
 
-type API struct {
-	db *mgo.Session
-}
+type API struct{}
 
 func (a *API) createDatabase(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
 	username, password, database := random.Hex(16), random.Hex(16), random.Hex(16)
-	// TODO(jpg)
+
+	session, err := mgo.DialWithInfo(&mgo.DialInfo{
+		Addrs:    []string{net.JoinHostPort(serviceHost, "27017")},
+		Username: "flynn",
+		Password: os.Getenv("MONGO_PWD"),
+		Database: "admin",
+	})
+	if err != nil {
+		httphelper.Error(w, err)
+		return
+	}
+	defer session.Close()
+
 	// Create a user
-	// Create a database
+	var userResponse bson.M
+	if err := session.DB("admin").Run(bson.D{
+		{"createUser", username},
+		{"pwd", password},
+		{"roles", []bson.M{
+			{"role": "dbOwner", "db": database},
+		}},
+	}, &userResponse); err != nil {
+		httphelper.Error(w, err)
+		return
+	}
+
 	// Assign any required roles
 	url := fmt.Sprintf("mongo://%s:%s@%s:27017/%s", username, password, serviceHost, database)
 	httphelper.JSON(w, 200, resource.Resource{
@@ -85,17 +104,47 @@ func (a *API) dropDatabase(w http.ResponseWriter, req *http.Request, _ httproute
 		httphelper.ValidationError(w, "id", "is invalid")
 		return
 	}
-	//TODO(jpg)
-	// Delete database
-	// Delete user
+	user, database := id[0], id[1]
+
+	session, err := mgo.DialWithInfo(&mgo.DialInfo{
+		Addrs:    []string{net.JoinHostPort(serviceHost, "27017")},
+		Username: "flynn",
+		Password: os.Getenv("MONGO_PWD"),
+		Database: database,
+	})
+	if err != nil {
+		httphelper.Error(w, err)
+		return
+	}
+	defer session.Close()
+
+	// Delete user.
+	if err := session.DB(database).Run(bson.D{{"dropUser", user}}, nil); err != nil {
+		httphelper.Error(w, err)
+		return
+	}
+
+	// Delete database.
+	if err := session.DB(database).Run(bson.D{{"dropDatabase", 1}}, nil); err != nil {
+		httphelper.Error(w, err)
+		return
+	}
 
 	w.WriteHeader(200)
 }
 
 func (a *API) ping(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
-	if err := a.db.Ping(); err != nil {
+	session, err := mgo.DialWithInfo(&mgo.DialInfo{
+		Addrs:    []string{net.JoinHostPort(serviceHost, "27017")},
+		Username: "flynn",
+		Password: os.Getenv("MONGO_PWD"),
+		Database: "admin",
+	})
+	if err != nil {
 		httphelper.Error(w, err)
 		return
 	}
+	defer session.Close()
+
 	w.WriteHeader(200)
 }

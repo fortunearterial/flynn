@@ -970,7 +970,6 @@ func (p *Process) DialInfo() *mgo.DialInfo {
 }
 
 func (p *Process) XLogPosition() (xlog.Position, error) {
-	logger := p.Logger.New("fn", "XLogPosition")
 	status, err := p.replSetGetStatus()
 	if err != nil {
 		return p.XLog().Zero(), nil
