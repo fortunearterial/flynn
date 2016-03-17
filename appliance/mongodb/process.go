@@ -3,6 +3,7 @@ package mongodb
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -188,7 +189,6 @@ func (p *Process) getReplConfig() (*replSetConfig, error) {
 		return nil, err
 	}
 	defer session.Close()
-	session.SetMode(mgo.Monotonic, true)
 
 	// Retrieve replica set configuration.
 	var result struct {
@@ -201,13 +201,12 @@ func (p *Process) getReplConfig() (*replSetConfig, error) {
 }
 
 func (p *Process) setReplConfig(config replSetConfig) error {
-	session, err := mgo.DialWithInfo(p.DialInfo())
+	session, err := p.connectLocal()
 	if err != nil {
 		return err
 	}
 	defer session.Close()
 
-	session.SetMode(mgo.Monotonic, true)
 	if session.Run(bson.D{{"replSetReconfig", config}, {"force", true}}, nil); err != nil {
 		return err
 	}
@@ -411,7 +410,7 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 			return err
 		}
 	} else {
-
+		logger.Info("database not running")
 	}
 
 	logger.Info("starting database")
@@ -435,7 +434,6 @@ func (p Process) replSetGetStatus() (*replSetStatus, error) {
 		return nil, err
 	}
 	defer session.Close()
-	session.SetMode(mgo.Monotonic, true)
 
 	var status replSetStatus
 	if err := session.Run(bson.D{{"replSetGetStatus", 1}}, &status); err != nil {
@@ -554,13 +552,11 @@ func (p *Process) initPrimaryDB(clusterState *state.State) error {
 
 func (p *Process) replSetInitiate(clusterState *state.State) error {
 	logger := p.Logger.New("fn", "replSetInitiate")
-	session, err := mgo.DialWithInfo(p.DialInfo())
+	session, err := p.connectLocal()
 	if err != nil {
 		return err
 	}
 	defer session.Close()
-
-	session.SetMode(mgo.Monotonic, true)
 
 	logger.Info("initialising replica set")
 	var initiateResponse bson.M
@@ -584,7 +580,6 @@ func (p *Process) replSetInitiate(clusterState *state.State) error {
 	if err != nil {
 		logger.Error("failed to reconfigure replia set", "err", err)
 		println("DBG: PASSWORD=", p.Password)
-		<-(chan struct{})(nil)
 		return err
 	}
 	return nil
@@ -640,6 +635,14 @@ func (p *Process) connectLocal() (*mgo.Session, error) {
 	session, err := mgo.DialWithInfo(p.DialInfo())
 	if err != nil {
 		return nil, err
+	}
+	switch p.config().Role {
+	case state.RolePrimary:
+		session.SetMode(mgo.Monotonic, true)
+	case state.RoleSync, state.RoleAsync:
+		session.SetMode(mgo.Secondary, true)
+	default:
+		panic(fmt.Sprintf("unknown role %s", p.config().Role))
 	}
 	return session, nil
 }
@@ -705,8 +708,29 @@ func (p *Process) stop() error {
 
 	p.cancelSyncWait()
 
+	logger.Info("attempting graceful shutdown")
+	session, err := p.connectLocal()
+	if err == nil {
+		result := bson.M{}
+		err := session.DB("admin").Run(bson.M{"shutdown": 1, "force": true}, &result)
+		if err == nil || err == io.EOF {
+			select {
+			case <-time.After(p.OpTimeout):
+				logger.Error("timed out waiting for graceful shutdown, proceeding to kill")
+			case <-p.cmd.Stopped():
+				logger.Info("database gracefully shutdown")
+				p.runningValue.Store(false)
+				return nil
+			}
+		} else {
+			logger.Error("error running shutdown command", "err", err)
+		}
+	} else {
+		logger.Error("error connecting to mongodb", "err", err)
+	}
+
 	// Attempt to kill.
-	logger.Debug("stopping daemon")
+	logger.Debug("stopping daemon forcefully")
 	if err := p.cmd.Stop(); err != nil {
 		logger.Error("error stopping command", "err", err)
 	}
@@ -913,27 +937,16 @@ func (p *Process) DialInfo() *mgo.DialInfo {
 }
 
 func (p *Process) XLogPosition() (xlog.Position, error) {
-	session, err := mgo.DialWithInfo(p.DialInfo())
+	status, err := p.replSetGetStatus()
 	if err != nil {
-		return p.XLog().Zero(), err
+		return p.XLog().Zero(), nil
 	}
-	defer session.Close()
-
-	switch p.config().Role {
-	case state.RolePrimary:
-		session.SetMode(mgo.Monotonic, true)
-	case state.RoleSync, state.RoleAsync:
-		session.SetMode(mgo.Secondary, true)
-	default:
-		panic(fmt.Sprintf("unknown role %s", p.config().Role))
+	for _, m := range status.Members {
+		if m.Name == p.addr() {
+			return xlog.Position(strconv.FormatInt(m.Optime.Timestamp, 10)), nil
+		}
 	}
-	var entry bson.M
-	// TODO(jpg): Investigate if it's better to get this via the
-	// replica set status of if this is prefferred.
-	if err := session.DB("local").C("oplog.rs").Find(nil).Sort("-ts").One(&entry); err != nil {
-		return p.XLog().Zero(), fmt.Errorf("find oplog.rs.ts error: %s", err)
-	}
-	return xlog.Position(strconv.FormatInt(int64(entry["ts"].(bson.MongoTimestamp)), 10)), nil
+	return p.XLog().Zero(), fmt.Errorf("error getting xlog, couldn't find self in replSetStatus")
 }
 
 // XLogPosition returns the current XLogPosition of node specified by DSN.
@@ -1001,6 +1014,7 @@ net:
 
 {{if .SecurityEnabled}}
 security:
+  keyFile: {{.DataDir}}/Keyfile
   authorization: enabled
 {{end}}
 

@@ -1,5 +1,7 @@
 package mongodb
 
+// Config structures
+
 type replSetMember struct {
 	ID       int    `bson:"_id"`
 	Host     string `bson:"host"`
@@ -13,8 +15,16 @@ type replSetConfig struct {
 	Version int
 }
 
+// Status structures
+
+type replSetOptime struct {
+	Timestamp int64 `bson:"ts"`
+	Term      int64 `bson::"t`
+}
+
 type replSetStatusMember struct {
-	Name string `bson:"name"`
+	Name   string        `bson:"name"`
+	Optime replSetOptime `bson:"optime"`
 }
 
 type replSetStatus struct {

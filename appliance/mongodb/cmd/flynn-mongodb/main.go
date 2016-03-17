@@ -50,6 +50,11 @@ func main() {
 		}
 	}
 
+	keyFile := filepath.Join(dataDir, "Keyfile")
+	if err := ioutil.WriteFile(keyFile, []byte(password), 0600); err != nil {
+		shutdown.Fatalf("error writing keyfile: %s", err)
+	}
+
 	err = discoverd.DefaultClient.AddService(serviceName, &discoverd.ServiceConfig{
 		LeaderType: discoverd.LeaderTypeManual,
 	})
