@@ -87,6 +87,15 @@ type Process struct {
 	cancelSyncWait func()
 }
 
+type mgoLogger struct {
+	l log15.Logger
+}
+
+func (l mgoLogger) Output(calldepth int, s string) error {
+	l.l.Debug(s)
+	return nil
+}
+
 // NewProcess returns a new instance of Process.
 func NewProcess() *Process {
 	p := &Process{
@@ -105,6 +114,9 @@ func NewProcess() *Process {
 	p.runningValue.Store(false)
 	p.configValue.Store((*state.Config)(nil))
 	p.events <- state.DatabaseEvent{}
+	// XXX(jpg): For debugging driver
+	//mgo.SetLogger(mgoLogger{p.Logger})
+	//mgo.SetDebug(true)
 	return p
 }
 
@@ -210,6 +222,8 @@ func (p *Process) setReplConfig(config replSetConfig) error {
 	if session.Run(bson.D{{"replSetReconfig", config}, {"force", true}}, nil); err != nil {
 		return err
 	}
+	// XXX(jpg): Prevent mongodb implosion if a reconfigure comes too soon after this one
+	time.Sleep(5 * time.Second)
 	return nil
 }
 
@@ -398,7 +412,7 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 	logger := p.Logger.New("fn", "assumeStandby", "upstream", upstream.Addr)
 	logger.Info("starting up as standby")
 
-	p.securityEnabled = false
+	p.securityEnabled = true
 	if err := p.writeConfig(configData{ReplicationEnabled: true}); err != nil {
 		logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
 		return err
@@ -430,8 +444,7 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 }
 
 func (p Process) replSetGetStatus() (*replSetStatus, error) {
-	logger := p.Logger.New("fn", "replSetGetStatus")
-	session, err := mgo.DialWithInfo(p.DialInfo())
+	session, err := p.connectLocal()
 	if err != nil {
 		return nil, err
 	}
@@ -508,8 +521,6 @@ func (p *Process) initPrimaryDB(clusterState *state.State) error {
 	logger := p.Logger.New("fn", "initPrimaryDB")
 	logger.Info("initializing primary database")
 
-	// mgo.SetDebug(true) // TEMP(benbjohnson)
-
 	// check if admin user has been created
 	created, err := p.isUserCreated()
 	if err != nil {
@@ -533,7 +544,6 @@ func (p *Process) initPrimaryDB(clusterState *state.State) error {
 		if err := p.start(); err != nil {
 			return err
 		}
-		time.Sleep(2 * time.Second)
 		if err := p.createUser(); err != nil {
 			return err
 		}
@@ -550,7 +560,6 @@ func (p *Process) initPrimaryDB(clusterState *state.State) error {
 		if err := p.start(); err != nil {
 			return err
 		}
-		time.Sleep(2 * time.Second)
 		logger.Info("user created successfully")
 	}
 
@@ -560,11 +569,11 @@ func (p *Process) initPrimaryDB(clusterState *state.State) error {
 	if err != nil {
 		return err
 	}
-	logger.Info("initialise?")
 	if !initialized && clusterState != nil {
 		if err := p.replSetInitiate(clusterState); err != nil {
 			return err
 		}
+
 	}
 
 	// TODO(jpg): restart the database with new configuration, enabling authentication
@@ -944,13 +953,15 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 
 // DialInfo returns dial info for connecting to the local process as the "flynn" user.
 func (p *Process) DialInfo() *mgo.DialInfo {
+	localhost := net.JoinHostPort("localhost", p.Port)
 	info := &mgo.DialInfo{
-		Addrs:   []string{p.addr()},
+		Addrs:   []string{localhost},
 		Timeout: p.OpTimeout,
 		Direct:  true,
 	}
 
 	if p.securityEnabled {
+		info.Addrs = []string{p.addr()}
 		info.Database = "admin"
 		info.Username = "flynn"
 		info.Password = p.Password
@@ -959,6 +970,7 @@ func (p *Process) DialInfo() *mgo.DialInfo {
 }
 
 func (p *Process) XLogPosition() (xlog.Position, error) {
+	logger := p.Logger.New("fn", "XLogPosition")
 	status, err := p.replSetGetStatus()
 	if err != nil {
 		return p.XLog().Zero(), nil

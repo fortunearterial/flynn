@@ -77,6 +77,7 @@ func main() {
 	process.Password = password
 	process.Singleton = singleton
 	process.ServerID = serverId
+	process.Host = ip
 
 	dd := sd.NewDiscoverd(discoverd.DefaultClient.Service(serviceName), log.New("component", "discoverd"))
 
