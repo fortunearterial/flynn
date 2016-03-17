@@ -380,6 +380,7 @@ func (p *Process) assumePrimary(downstream *discoverd.Instance, clusterState *st
 	}
 
 	if err := p.initPrimaryDB(clusterState); err != nil {
+		logger.Error("error initialising primary, attempting stop")
 		if e := p.stop(); err != nil {
 			logger.Debug("ignoring error stopping process", "err", e)
 		}
@@ -429,17 +430,20 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 }
 
 func (p Process) replSetGetStatus() (*replSetStatus, error) {
+	logger := p.Logger.New("fn", "replSetGetStatus")
 	session, err := mgo.DialWithInfo(p.DialInfo())
 	if err != nil {
 		return nil, err
 	}
 	defer session.Close()
 
+	return replSetGetStatusQuery(session)
+}
+
+func replSetGetStatusQuery(session *mgo.Session) (*replSetStatus, error) {
 	var status replSetStatus
-	if err := session.Run(bson.D{{"replSetGetStatus", 1}}, &status); err != nil {
-		return nil, err
-	}
-	return &status, nil
+	err := session.DB("admin").Run(bson.D{{"replSetGetStatus", 1}}, &status)
+	return &status, err
 }
 
 func (p Process) isReplInitialised() (bool, error) {
@@ -487,7 +491,7 @@ func (p Process) createUser() error {
 	if err := session.DB("admin").Run(bson.D{
 		{"createUser", "flynn"},
 		{"pwd", p.Password},
-		{"roles", []bson.M{{"role": "root", "db": "admin"}}},
+		{"roles", []bson.M{{"role": "root", "db": "admin"}, {"role": "dbOwner", "db": "admin"}}},
 	}, &userResponse); err != nil {
 		return err
 	}
@@ -509,37 +513,54 @@ func (p *Process) initPrimaryDB(clusterState *state.State) error {
 	// check if admin user has been created
 	created, err := p.isUserCreated()
 	if err != nil {
+		logger.Error("error creating user")
 		return err
 	}
 
 	// user doesn't exist yet
 	if !created {
-		p.stop()
+		logger.Info("stopping database to disable security")
+		if err := p.stop(); err != nil {
+			return err
+		}
 		// we need to start the database with both replication and security disabled
 		p.securityEnabled = false
 		if err := p.writeConfig(configData{}); err != nil {
 			logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
 			return err
 		}
-		p.start()
+		logger.Info("starting database to create user")
+		if err := p.start(); err != nil {
+			return err
+		}
+		time.Sleep(2 * time.Second)
 		if err := p.createUser(); err != nil {
 			return err
 		}
-		p.stop()
-
+		logger.Info("stopping database to re-enable security")
+		if err := p.stop(); err != nil {
+			return err
+		}
 		p.securityEnabled = true
 		if err := p.writeConfig(configData{ReplicationEnabled: true}); err != nil {
 			logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
 			return err
 		}
-		p.start()
+		logger.Info("starting database with security enabled")
+		if err := p.start(); err != nil {
+			return err
+		}
+		time.Sleep(2 * time.Second)
+		logger.Info("user created successfully")
 	}
 
 	// check if replica set has been initialised
+	logger.Info("checking if replica set has been initialised")
 	initialized, err := p.isReplInitialised()
 	if err != nil {
 		return err
 	}
+	logger.Info("initialise?")
 	if !initialized && clusterState != nil {
 		if err := p.replSetInitiate(clusterState); err != nil {
 			return err
@@ -552,6 +573,7 @@ func (p *Process) initPrimaryDB(clusterState *state.State) error {
 
 func (p *Process) replSetInitiate(clusterState *state.State) error {
 	logger := p.Logger.New("fn", "replSetInitiate")
+	logger.Info("initialising replica set")
 	session, err := p.connectLocal()
 	if err != nil {
 		return err
@@ -956,15 +978,18 @@ func (p *Process) nodeXLogPosition(info *mgo.DialInfo) (xlog.Position, error) {
 		return p.XLog().Zero(), err
 	}
 	defer session.Close()
+	session.SetMode(mgo.Secondary, true) // TODO(jpg): do we need to handle other modes?
 
-	var entry bson.M
-
-	// TODO(jpg): Investigate if it's better to get this via the
-	// replica set status of if this is prefferred.
-	if err := session.DB("local").C("oplog.rs").Find(nil).Sort("-ts").One(&entry); err != nil {
-		return p.XLog().Zero(), fmt.Errorf("find oplog.rs.ts error: %s", err)
+	status, err := replSetGetStatusQuery(session)
+	if err != nil {
+		return p.XLog().Zero(), err
 	}
-	return xlog.Position(strconv.FormatInt(int64(entry["ts"].(bson.MongoTimestamp)), 10)), nil
+	for _, m := range status.Members {
+		if m.Name == p.addr() {
+			return xlog.Position(strconv.FormatInt(m.Optime.Timestamp, 10)), nil
+		}
+	}
+	return p.XLog().Zero(), fmt.Errorf("error getting xlog, couldn't find self in replSetStatus")
 }
 
 func (p *Process) runCmd(cmd *exec.Cmd) error {
