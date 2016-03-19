@@ -3,8 +3,10 @@ package mongodb
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -33,8 +35,11 @@ func (MongoDBSuite) TestSingletonPrimary(c *C) {
 	p.DataDir = c.MkDir()
 	p.Port = "7500"
 	p.OpTimeout = 30 * time.Second
-	topology := &state.State{Primary: instance(p)}
-	err := p.Reconfigure(&state.Config{Role: state.RolePrimary, State: topology})
+	keyFile := filepath.Join(p.DataDir, "Keyfile")
+	err := ioutil.WriteFile(keyFile, []byte("password"), 0600)
+	c.Assert(err, IsNil)
+	topology := &state.State{Singleton: true, Primary: instance(p)}
+	err = p.Reconfigure(&state.Config{Role: state.RolePrimary, State: topology})
 	c.Assert(err, IsNil)
 
 	err = p.Start()
@@ -57,6 +62,9 @@ func (MongoDBSuite) TestSingletonPrimary(c *C) {
 	p.DataDir = c.MkDir()
 	p.Port = "7500"
 	p.OpTimeout = 30 * time.Second
+	keyFile = filepath.Join(p.DataDir, "Keyfile")
+	err = ioutil.WriteFile(keyFile, []byte("password"), 0600)
+	c.Assert(err, IsNil)
 	err = p.Reconfigure(&state.Config{Role: state.RolePrimary, State: topology})
 	c.Assert(err, IsNil)
 	c.Assert(p.Start(), IsNil)
@@ -83,8 +91,10 @@ func instance(p *Process) *discoverd.Instance {
 
 func connect(c *C, p *Process, database string) *mgo.Session {
 	session, err := mgo.DialWithInfo(&mgo.DialInfo{
+		Username: "flynn",
+		Password: "password",
 		Addrs:    []string{fmt.Sprintf("127.0.0.1:%d", MustAtoi(p.Port))},
-		Database: database,
+		Database: "admin",
 		Direct:   true,
 	})
 	c.Assert(err, IsNil)
@@ -148,15 +158,8 @@ func insertDoc(c *C, session *mgo.Session, n int) {
 
 func waitReadWrite(c *C, session *mgo.Session) {
 	err := queryAttempts.Run(func() error {
-		var entry struct {
-			Retval struct {
-				IsMaster bool `bson:"ismaster"`
-			} `bson:"retval"`
-		}
-		if err := session.Run(bson.D{{"eval", `db.isMaster()`}}, &entry); err != nil {
-			return err
-		}
-		if !entry.Retval.IsMaster {
+		status, err := replSetGetStatusQuery(session)
+		if err != nil || status.MyState != Primary {
 			return errors.New("not master")
 		}
 		return nil
@@ -471,6 +474,9 @@ func NewTestProcess(c *C, n uint32) *Process {
 	p.Password = "password"
 	p.OpTimeout = 30 * time.Second
 	p.Logger = p.Logger.New("id", p.ID, "port", p.Port)
+	keyFile := filepath.Join(p.DataDir, "Keyfile")
+	err := ioutil.WriteFile(keyFile, []byte("password"), 0600)
+	c.Assert(err, IsNil)
 	return p
 }
 

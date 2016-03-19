@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	DefaultHost        = "localhost"
+	DefaultHost        = "127.0.0.1"
 	DefaultPort        = "27017"
 	DefaultBinDir      = "/usr/bin"
 	DefaultDataDir     = "/data"
@@ -758,7 +758,7 @@ func (p *Process) stop() error {
 	session, err := p.connectLocal()
 	if err == nil {
 		result := bson.M{}
-		err := session.DB("admin").Run(bson.M{"shutdown": 1, "force": true}, &result)
+		err := session.DB("admin").Run(bson.D{{"shutdown", 1}, {"force", true}}, &result)
 		if err == nil || err == io.EOF {
 			select {
 			case <-time.After(p.OpTimeout):
@@ -819,22 +819,8 @@ func (p *Process) isReadWrite() (bool, error) {
 	if !p.running() {
 		return false, nil
 	}
-
-	session, err := p.connectLocal()
-	if err != nil {
-		return false, err
-	}
-	defer session.Close()
-
-	var entry struct {
-		Retval struct {
-			IsMaster bool `bson:"ismaster"`
-		} `bson:"retval"`
-	}
-	if err := session.Run(bson.D{{"eval", `db.isMaster()`}}, &entry); err != nil {
-		return false, err
-	}
-	return entry.Retval.IsMaster, nil
+	status, err := p.replSetGetStatus()
+	return status.MyState == Primary, err
 }
 
 func (p *Process) userExists() (bool, error) {

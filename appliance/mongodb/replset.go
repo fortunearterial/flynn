@@ -17,6 +17,21 @@ type replSetConfig struct {
 
 // Status structures
 
+type replicaState int
+
+const (
+	Startup = iota
+	Primary
+	Secondary
+	Recovering
+	Startup2
+	Unknown
+	Arbiter
+	Down
+	Rollback
+	Removed
+)
+
 type replSetOptime struct {
 	Timestamp int64 `bson:"ts"`
 	Term      int64 `bson::"t`
@@ -28,5 +43,6 @@ type replSetStatusMember struct {
 }
 
 type replSetStatus struct {
+	MyState replicaState          `bson:"myState"`
 	Members []replSetStatusMember `bson:"members"`
 }
