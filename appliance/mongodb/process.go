@@ -412,13 +412,6 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 	logger := p.Logger.New("fn", "assumeStandby", "upstream", upstream.Addr)
 	logger.Info("starting up as standby")
 
-	p.securityEnabled = true
-	if err := p.writeConfig(configData{ReplicationEnabled: true}); err != nil {
-		logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
-		return err
-	}
-
-	/*var backupInfo *BackupInfo*/
 	if p.running() {
 		logger.Info("stopping database")
 		if err := p.stop(); err != nil {
@@ -428,10 +421,21 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 		logger.Info("database not running")
 	}
 
+	p.securityEnabled = true
+	if err := p.writeConfig(configData{ReplicationEnabled: true}); err != nil {
+		logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
+		return err
+	}
+
 	logger.Info("starting database")
 	if err := p.start(); err != nil {
 		return err
 	}
+
+	if err := p.replSetSyncFrom(upstream); err != nil {
+		return err
+	}
+
 	if err := p.waitForUpstream(upstream); err != nil {
 		return err
 	}
@@ -441,6 +445,17 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 	}
 
 	return nil
+}
+
+func (p Process) replSetSyncFrom(upstream *discoverd.Instance) error {
+	session, err := p.connectLocal()
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+
+	result := bson.M{}
+	return session.Run(bson.M{"replSetSyncFrom": upstream.Addr}, &result)
 }
 
 func (p Process) replSetGetStatus() (*replSetStatus, error) {
