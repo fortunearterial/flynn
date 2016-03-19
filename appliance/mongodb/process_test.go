@@ -46,7 +46,7 @@ func (MongoDBSuite) TestSingletonPrimary(c *C) {
 	c.Assert(err, IsNil)
 	defer p.Stop()
 
-	session := connect(c, p, "")
+	session := connect(c, p)
 	/*_, err = session.Exec("CREATE DATABASE test")*/
 	session.Close()
 	c.Assert(err, IsNil)
@@ -70,7 +70,7 @@ func (MongoDBSuite) TestSingletonPrimary(c *C) {
 	c.Assert(p.Start(), IsNil)
 	defer p.Stop()
 
-	session = connect(c, p, "")
+	session = connect(c, p)
 	/*_, err = session.Exec("CREATE DATABASE foo")*/
 	session.Close()
 	c.Assert(err, IsNil)
@@ -89,7 +89,7 @@ func instance(p *Process) *discoverd.Instance {
 	}
 }
 
-func connect(c *C, p *Process, database string) *mgo.Session {
+func connect(c *C, p *Process) *mgo.Session {
 	session, err := mgo.DialWithInfo(&mgo.DialInfo{
 		Username: "flynn",
 		Password: "password",
@@ -118,25 +118,16 @@ var queryAttempts = attempt.Strategy{
 	Delay: 200 * time.Millisecond,
 }
 
-func assertDownstream(c *C, session *mgo.Session, downstream *Process) {
-	var entry struct {
-		Retval struct {
-			Members []struct {
-				Name string `bson:"name"`
-			} `bson:"members"`
-		} `bson:"retval"`
-	}
-	if err := session.Run(bson.D{{"eval", `rs.status()`}}, &entry); err != nil {
-		c.Assert(err, IsNil)
-	}
-
-	var names []string
-	for _, member := range entry.Retval.Members {
+func assertDownstream(c *C, session *mgo.Session, upstream, downstream *Process) {
+	status, err := replSetGetStatusQuery(session)
+	c.Assert(err, IsNil)
+	for _, member := range status.Members {
 		if member.Name == downstream.Host+":"+downstream.Port {
+			c.Assert(member.SyncingTo, Equals, upstream.Host+":"+upstream.Port)
 			return
 		}
 	}
-	c.Fatalf("downstream not in member list: %+v", names)
+	c.Fatalf("downstream not in member list: %+v", status.Members)
 }
 
 func waitRow(c *C, session *mgo.Session, n int) {
@@ -203,6 +194,10 @@ func (MongoDBSuite) TestIntegration_TwoNodeSync(c *C) {
 	srv1 := NewHTTPServer(c, node1)
 	defer srv1.Close()
 
+	// Connect to primary
+	db1 := connect(c, node1)
+	defer db1.Close()
+
 	// Start a sync
 	err = node2.Reconfigure(Config(state.RoleSync, node1, nil, topology))
 	c.Assert(err, IsNil)
@@ -212,19 +207,18 @@ func (MongoDBSuite) TestIntegration_TwoNodeSync(c *C) {
 	srv2 := NewHTTPServer(c, node2)
 	defer srv2.Close()
 
-	// check it catches up
+	// Check it catches up
 	waitReplSync(c, node1, 2)
+	assertDownstream(c, db1, node1, node2)
 
 	// Write to the master.
-	session1 := connect(c, node1, "db0")
-	defer session1.Close()
-	insertDoc(c, session1, 1)
+	insertDoc(c, db1, 1)
 
-	// Read from the slave.
-	session2 := connect(c, node2, "db0")
-	session2.SetMode(mgo.Secondary, true)
-	defer session2.Close()
-	waitRow(c, session2, 1)
+	// Read from the sync
+	db2 := connect(c, node2)
+	db2.SetMode(mgo.Secondary, true)
+	defer db2.Close()
+	waitRow(c, db2, 1)
 }
 
 func (MongoDBSuite) TestIntegration_FourNode(c *C) {
@@ -249,7 +243,7 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	defer srv1.Close()
 
 	// try to write to primary and make sure it's read-only
-	db1 := connect(c, node1, "db0")
+	db1 := connect(c, node1)
 	defer db1.Close()
 
 	// Start a sync
@@ -271,17 +265,16 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 		pos, err := n.XLogPosition()
 		c.Assert(err, IsNil)
 		c.Assert(pos, Not(Equals), "")
-		c.Assert(pos, Not(Equals), "master-bin.000000/0")
 	}
 
-	// make sure the sync is listed as sync and remote_write is enabled
-	assertDownstream(c, db1, node2)
+	// make sure the sync is listed as syncing from the primary
+	assertDownstream(c, db1, node1, node2)
 
 	// create a table and a row
 	insertDoc(c, db1, 1)
 
 	// query the sync and see the database
-	db2 := connect(c, node2, "db0")
+	db2 := connect(c, node2)
 	db2.SetMode(mgo.Secondary, true)
 	defer db2.Close()
 	waitRow(c, db2, 1)
@@ -298,13 +291,13 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	// check it catches up
 	waitReplSync(c, node2, 3)
 
-	db3 := connect(c, node3, "db0")
+	db3 := connect(c, node3)
 	db3.SetMode(mgo.Secondary, true)
 	defer db3.Close()
 
 	// check that data replicated successfully
 	waitRow(c, db3, 1)
-	assertDownstream(c, db1, node3)
+	assertDownstream(c, db1, node2, node3)
 
 	// Start a second async
 	err = node4.Reconfigure(Config(state.RoleAsync, node3, nil, topology))
@@ -318,13 +311,13 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	// check it catches up
 	waitReplSync(c, node3, 4)
 
-	db4 := connect(c, node4, "db0")
+	db4 := connect(c, node4)
 	db4.SetMode(mgo.Secondary, true)
 	defer db4.Close()
 
 	// check that data replicated successfully
 	waitRow(c, db4, 1)
-	assertDownstream(c, db1, node4)
+	assertDownstream(c, db1, node3, node4)
 
 	// promote node2 to primary
 	topology = &state.State{
@@ -340,7 +333,7 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 
 	// Reconnect to node 2 as primary.
 	db2.Close()
-	db2 = connect(c, node2, "db0")
+	db2 = connect(c, node2)
 	defer db2.Close()
 
 	// wait for recovery and read-write transactions to come up
@@ -348,8 +341,8 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 	waitReadWrite(c, db2)
 
 	// check replication of each node
-	assertDownstream(c, db2, node3)
-	assertDownstream(c, db2, node4)
+	assertDownstream(c, db2, node2, node3)
+	assertDownstream(c, db2, node3, node4)
 
 	// write to primary and ensure data propagates to followers
 	insertDoc(c, db2, 2)
@@ -365,7 +358,11 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 		Sync:    instance(node4),
 	}
 
-	//  promote node3 to primary
+	// promote node3 to primary
+	topology = &state.State{
+		Primary: instance(node3),
+		Sync:    instance(node4),
+	}
 	c.Assert(node2.Stop(), IsNil)
 	err = node3.Reconfigure(Config(state.RolePrimary, nil, node4, topology))
 	c.Assert(err, IsNil)
@@ -373,13 +370,13 @@ func (MongoDBSuite) TestIntegration_FourNode(c *C) {
 
 	// Reconnect to node 3 as primary.
 	db3.Close()
-	db3 = connect(c, node3, "db0")
+	db3 = connect(c, node3)
 	defer db3.Close()
 
 	// check replication
 	waitReplSync(c, node3, 4)
 	waitReadWrite(c, db3)
-	assertDownstream(c, db3, node4)
+	assertDownstream(c, db3, node3, node4)
 	insertDoc(c, db3, 3)
 }
 
@@ -429,9 +426,9 @@ func (MongoDBSuite) TestRemoveNodes(c *C) {
 	defer srv4.Close()
 
 	// wait for cluster to come up
-	node1Conn := connect(c, node1, "db0")
+	node1Conn := connect(c, node1)
 	defer node1Conn.Close()
-	db4 := connect(c, node4, "db0")
+	db4 := connect(c, node4)
 	defer db4.Close()
 	waitReadWrite(c, node1Conn)
 	insertDoc(c, node1Conn, 1)
@@ -445,7 +442,7 @@ func (MongoDBSuite) TestRemoveNodes(c *C) {
 	c.Assert(err, IsNil)
 
 	// run query
-	db4 = connect(c, node4, "db0")
+	db4 = connect(c, node4)
 	defer db4.Close()
 	insertDoc(c, node1Conn, 2)
 	waitRow(c, db4, 2)
@@ -458,7 +455,7 @@ func (MongoDBSuite) TestRemoveNodes(c *C) {
 
 	waitReadWrite(c, node1Conn)
 	insertDoc(c, node1Conn, 3)
-	db4 = connect(c, node4, "db0")
+	db4 = connect(c, node4)
 	defer db4.Close()
 	waitRow(c, db4, 3)
 }

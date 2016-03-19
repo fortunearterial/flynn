@@ -38,8 +38,9 @@ type replSetOptime struct {
 }
 
 type replSetStatusMember struct {
-	Name   string        `bson:"name"`
-	Optime replSetOptime `bson:"optime"`
+	Name      string        `bson:"name"`
+	Optime    replSetOptime `bson:"optime"`
+	SyncingTo string        `bson:"syncingTo"`
 }
 
 type replSetStatus struct {
