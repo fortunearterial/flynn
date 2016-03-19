@@ -25,13 +25,6 @@ import (
 	"github.com/flynn/flynn/pkg/sirenia/xlog"
 )
 
-type Topology int
-
-const (
-	Chained Topology = iota
-	Flat
-)
-
 type State struct {
 	Generation int                   `json:"generation"`
 	Freeze     *FreezeDetails        `json:"freeze,omitempty"`
@@ -163,7 +156,7 @@ func (x *Config) Equal(y *Config) bool {
 		return x == y
 	}
 
-	return x.Role == y.Role && peersEqual(x.Upstream, y.Upstream) && peersEqual(x.Downstream, y.Downstream) && x.State.Equal(y.State)
+	return x.Role == y.Role && peersEqual(x.Upstream, y.Upstream) && peersEqual(x.Downstream, y.Downstream)
 }
 
 func (x *Config) IsNewDownstream(y *Config) bool {
@@ -231,7 +224,6 @@ type Peer struct {
 	idKey     string
 	self      *discoverd.Instance
 	singleton bool
-	topology  Topology
 
 	// External Interfaces
 	log       log15.Logger
@@ -260,13 +252,12 @@ type Peer struct {
 	closeOnce sync.Once
 }
 
-func NewPeer(self *discoverd.Instance, id string, idKey string, singleton bool, d Discoverd, db Database, topology Topology, log log15.Logger) *Peer {
+func NewPeer(self *discoverd.Instance, id string, idKey string, singleton bool, d Discoverd, db Database, log log15.Logger) *Peer {
 	p := &Peer{
 		id:          id,
 		idKey:       idKey,
 		self:        self,
 		singleton:   singleton,
-		topology:    topology,
 		db:          db,
 		discoverd:   d,
 		log:         log,
@@ -1007,9 +998,7 @@ func (p *Peer) startUpdateAsyncs(newAsync []*discoverd.Instance) {
 		p.setState(p.updatingState)
 	}
 	p.updatingState = nil
-	if p.topology == Flat {
-		p.triggerApplyConfig()
-	}
+	p.triggerApplyConfig()
 	p.triggerEval()
 }
 
@@ -1027,7 +1016,7 @@ func (p *Peer) applyConfig() (err error) {
 	}
 
 	config := p.Config()
-	if p.applied != nil && p.applied.Equal(config) {
+	if p.applied != nil && p.applied.Equal(config) && p.applied.State.Equal(config.State) {
 		log.Info("skipping config apply, no changes")
 		return nil
 	}
@@ -1090,14 +1079,7 @@ func (p *Peer) Config() *Config {
 	role := p.Info().Role
 	switch role {
 	case RolePrimary, RoleSync, RoleAsync:
-		switch p.topology {
-		case Chained:
-			return &Config{Role: role, Upstream: p.upstream, Downstream: p.downstream}
-		case Flat:
-			return &Config{Role: role, Upstream: p.upstream, Downstream: p.downstream, State: p.Info().State}
-		default:
-			panic(fmt.Sprintf("unexpected topology %v", p.topology))
-		}
+		return &Config{Role: role, Upstream: p.upstream, Downstream: p.downstream, State: p.Info().State}
 	case RoleUnassigned, RoleDeposed:
 		return &Config{Role: RoleNone}
 	default:

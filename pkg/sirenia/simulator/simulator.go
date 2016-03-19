@@ -145,7 +145,7 @@ func (s *Simulator) createSimPeer() *simPeer {
 	ident := s.newPeerIdent("")
 	dd := s.discoverd.NewClient(ident)
 	db := s.db.NewClient(ident)
-	p := state.NewPeer(ident, ident.Meta[simIdKey], simIdKey, s.singleton, dd, db, state.Chained, s.log.New("component", "peer"))
+	p := state.NewPeer(ident, ident.Meta[simIdKey], simIdKey, s.singleton, dd, db, s.log.New("component", "peer"))
 	p.SetDebugChannels(s.restCh, s.retryCh)
 
 	return &simPeer{
@@ -723,6 +723,10 @@ func (p *databaseSimulatorClient) Reconfigure(conf *state.Config) error {
 	s := p.p.ds.ClusterState()
 	if s.State == nil && conf.Role != state.RoleNone {
 		panic("attempted to configure database with no cluster state")
+	}
+
+	if p.Config.Equal(conf) {
+		return nil // nothing to apply, Upstream/Downstreams match - just state update
 	}
 
 	p.XLogWaiting = ""
