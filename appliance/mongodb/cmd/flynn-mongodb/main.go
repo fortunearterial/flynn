@@ -23,7 +23,7 @@ const (
 )
 
 func main() {
-	serviceName := os.Getenv("FLYNN_MGO")
+	serviceName := os.Getenv("FLYNN_MONGO")
 	if serviceName == "" {
 		serviceName = "mongodb"
 	}
