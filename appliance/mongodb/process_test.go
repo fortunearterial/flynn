@@ -426,12 +426,13 @@ func (MongoDBSuite) TestRemoveNodes(c *C) {
 	defer srv4.Close()
 
 	// wait for cluster to come up
-	node1Conn := connect(c, node1)
-	defer node1Conn.Close()
+	db1 := connect(c, node1)
+	defer db1.Close()
 	db4 := connect(c, node4)
+	db4.SetMode(mgo.Secondary, true)
 	defer db4.Close()
-	waitReadWrite(c, node1Conn)
-	insertDoc(c, node1Conn, 1)
+	waitReadWrite(c, db1)
+	insertDoc(c, db1, 1)
 	waitRow(c, db4, 1)
 	db4.Close()
 
@@ -443,8 +444,9 @@ func (MongoDBSuite) TestRemoveNodes(c *C) {
 
 	// run query
 	db4 = connect(c, node4)
+	db4.SetMode(mgo.Secondary, true)
 	defer db4.Close()
-	insertDoc(c, node1Conn, 2)
+	insertDoc(c, db1, 2)
 	waitRow(c, db4, 2)
 	db4.Close()
 
@@ -453,9 +455,10 @@ func (MongoDBSuite) TestRemoveNodes(c *C) {
 	c.Assert(node1.Reconfigure(Config(state.RolePrimary, nil, node4, topology)), IsNil)
 	c.Assert(node4.Reconfigure(Config(state.RoleSync, node1, nil, topology)), IsNil)
 
-	waitReadWrite(c, node1Conn)
-	insertDoc(c, node1Conn, 3)
+	waitReadWrite(c, db1)
+	insertDoc(c, db1, 3)
 	db4 = connect(c, node4)
+	db4.SetMode(mgo.Secondary, true)
 	defer db4.Close()
 	waitRow(c, db4, 3)
 }
