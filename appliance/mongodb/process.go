@@ -309,7 +309,7 @@ func (p *Process) reconfigure(config *state.Config) error {
 		}
 
 		// If we've already applied the same config, we don't need to do anything
-		if p.configApplied && config != nil && p.config() != nil && config.Equal(p.config()) {
+		if p.configApplied && config != nil && p.config() != nil && config.Equal(p.config()) && config.State.Equal(p.config().State) {
 			logger.Info("nothing to do", "reason", "config already applied")
 			return nil
 		}
@@ -338,18 +338,7 @@ func (p *Process) reconfigure(config *state.Config) error {
 		}
 
 		if config.Role == state.RolePrimary {
-			if !p.running() {
-				return p.assumePrimary(config.Downstream, config.State)
-			} else {
-				logger.Info("updating replica set configuration")
-				// TODO(jpg): Need to get current replica set configuration version
-				replSetCurrent, err := p.getReplConfig()
-				if err != nil {
-					return err
-				}
-				replSetNew := p.replSetConfigFromState(replSetCurrent, config.State)
-				return p.setReplConfig(replSetNew)
-			}
+			return p.assumePrimary(config.Downstream, config.State)
 		}
 
 		return p.assumeStandby(config.Upstream, config.Downstream)
@@ -370,8 +359,19 @@ func (p *Process) assumePrimary(downstream *discoverd.Instance, clusterState *st
 		logger = logger.New("downstream", downstream.Addr)
 	}
 
-	if p.running() && p.config().Role == state.RoleSync {
-		logger.Info("promoting to primary")
+	if p.running() {
+		if p.config().Role == state.RoleSync {
+			logger.Info("promoting to primary")
+		}
+		logger.Info("updating replica set configuration")
+		replSetCurrent, err := p.getReplConfig()
+		if err != nil {
+			return err
+		}
+		replSetNew := p.replSetConfigFromState(replSetCurrent, clusterState)
+		if err := p.setReplConfig(replSetNew); err != nil {
+			return err
+		}
 		p.waitForSync(downstream, true)
 		return nil
 	}
@@ -410,16 +410,15 @@ func (p *Process) assumePrimary(downstream *discoverd.Instance, clusterState *st
 
 func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error {
 	logger := p.Logger.New("fn", "assumeStandby", "upstream", upstream.Addr)
-	logger.Info("starting up as standby")
 
 	if p.running() {
 		logger.Info("stopping database")
 		if err := p.stop(); err != nil {
 			return err
 		}
-	} else {
-		logger.Info("database not running")
 	}
+
+	logger.Info("starting up as standby")
 
 	p.securityEnabled = true
 	if err := p.writeConfig(configData{ReplicationEnabled: true}); err != nil {
@@ -585,17 +584,26 @@ func (p *Process) initPrimaryDB(clusterState *state.State) error {
 		return err
 	}
 	if !initialized && clusterState != nil {
-		if err := p.replSetInitiate(clusterState); err != nil {
+		if err := p.replSetInitiate(); err != nil {
 			return err
 		}
 
 	}
-
-	// TODO(jpg): restart the database with new configuration, enabling authentication
+	replSetCurrent, err := p.getReplConfig()
+	if err != nil {
+		return err
+	}
+	replSetNew := p.replSetConfigFromState(replSetCurrent, clusterState)
+	err = p.setReplConfig(replSetNew)
+	if err != nil {
+		logger.Error("failed to reconfigure replia set", "err", err)
+		println("DBG: PASSWORD=", p.Password)
+		return err
+	}
 	return nil
 }
 
-func (p *Process) replSetInitiate(clusterState *state.State) error {
+func (p *Process) replSetInitiate() error {
 	logger := p.Logger.New("fn", "replSetInitiate")
 	logger.Info("initialising replica set")
 	session, err := p.connectLocal()
@@ -615,17 +623,6 @@ func (p *Process) replSetInitiate(clusterState *state.State) error {
 	}, &initiateResponse)
 	if err != nil {
 		logger.Error("failed to initialise replica set", "err", err)
-		return err
-	}
-	replSetCurrent, err := p.getReplConfig()
-	if err != nil {
-		return err
-	}
-	replSetNew := p.replSetConfigFromState(replSetCurrent, clusterState)
-	err = p.setReplConfig(replSetNew)
-	if err != nil {
-		logger.Error("failed to reconfigure replia set", "err", err)
-		println("DBG: PASSWORD=", p.Password)
 		return err
 	}
 	return nil
