@@ -11,6 +11,9 @@ RUN apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv EA312927 &&\
 
 ADD bin/flynn-mongodb /bin/flynn-mongodb
 ADD bin/flynn-mongodb-api /bin/flynn-mongodb-api
+
 ADD start.sh /bin/start-flynn-mongodb
+ADD dump.sh /bin/dump-flynn-mongodb
+ADD restore.sh /bin/restore-flynn-mongodb
 
 ENTRYPOINT ["/bin/start-flynn-mongodb"]
