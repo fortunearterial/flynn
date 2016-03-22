@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -e
 
 # Passthrough arguments and dump to temporary path.
 TMPFILE=`mktemp -d /tmp/dump.XXXXXXXXXX`

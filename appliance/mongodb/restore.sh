@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -e
 
 # Extract dump into a temporary directory.
 TMPFILE=`mktemp -d /tmp/dump.XXXXXXXXXX`
