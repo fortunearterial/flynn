@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 
 	c "github.com/flynn/flynn/Godeps/_workspace/src/github.com/flynn/go-check"
 	"github.com/flynn/flynn/Godeps/_workspace/src/gopkg.in/mgo.v2"
@@ -22,6 +23,21 @@ type mgoLogger struct {
 func (l mgoLogger) Output(calldepth int, s string) error {
 	debugf(l.t, s)
 	return nil
+}
+
+func (s *MongoDBSuite) TestDumpRestore(t *c.C) {
+	r := s.newGitRepo(t, "empty")
+	t.Assert(r.flynn("create"), Succeeds)
+	t.Assert(r.flynn("resource", "add", "mongodb"), Succeeds)
+	t.Assert(r.flynn("mongodb", "mongo", "--", "--eval", `db.foos.insert({data: "foobar"})`), Succeeds)
+
+	file := filepath.Join(t.MkDir(), "db.dump")
+	t.Assert(r.flynn("mongodb", "dump", "-f", file), Succeeds)
+	t.Assert(r.flynn("mongodb", "mongo", "--", "--eval", "db.foos.drop()"), Succeeds)
+
+	r.flynn("mongodb", "restore", "-f", file)
+	query := r.flynn("mongodb", "mongo", "--", "--eval", "db.foos.find()")
+	t.Assert(query, SuccessfulOutputContains, "foobar")
 }
 
 // Sirenia integration tests
