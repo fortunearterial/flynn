@@ -876,8 +876,22 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 			default:
 			}
 
+			// get repl status
+			status, err := p.replSetGetStatus()
+			if err != nil {
+				logger.Error("error getting replSetStatus")
+				startTime = time.Now().UTC()
+				select {
+				case <-stopCh:
+					logger.Debug("canceled, stopping")
+					return
+				case <-time.After(checkInterval):
+				}
+				continue
+			}
+
 			// Read local master status.
-			masterXLog, err := p.XLogPosition()
+			masterXLog, err := p.xlogPosFromStatus(p.addr(), status)
 			if err != nil {
 				logger.Error("error reading master xlog", "err", err)
 				startTime = time.Now().UTC()
@@ -892,12 +906,7 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 			logger.Info("master xlog", "gtid", masterXLog)
 
 			// Read downstream slave status.
-			slaveXLog, err := p.nodeXLogPosition(&mgo.DialInfo{
-				Addrs:    []string{downstream.Addr},
-				Username: "flynn",
-				Password: p.Password,
-				Timeout:  p.OpTimeout,
-			})
+			slaveXLog, err := p.xlogPosFromStatus(downstream.Addr, status)
 			if err != nil {
 				logger.Error("error reading slave xlog", "err", err)
 				startTime = time.Now().UTC()
@@ -972,33 +981,16 @@ func (p *Process) XLogPosition() (xlog.Position, error) {
 	if err != nil {
 		return p.XLog().Zero(), nil
 	}
-	for _, m := range status.Members {
-		if m.Name == p.addr() {
-			return xlog.Position(strconv.FormatInt(m.Optime.Timestamp, 10)), nil
-		}
-	}
-	return p.XLog().Zero(), fmt.Errorf("error getting xlog, couldn't find self in replSetStatus")
+	return p.xlogPosFromStatus(p.addr(), status)
 }
 
-// XLogPosition returns the current XLogPosition of node specified by DSN.
-func (p *Process) nodeXLogPosition(info *mgo.DialInfo) (xlog.Position, error) {
-	session, err := mgo.DialWithInfo(info)
-	if err != nil {
-		return p.XLog().Zero(), err
-	}
-	defer session.Close()
-	session.SetMode(mgo.Secondary, true) // TODO(jpg): do we need to handle other modes?
-
-	status, err := replSetGetStatusQuery(session)
-	if err != nil {
-		return p.XLog().Zero(), err
-	}
+func (p *Process) xlogPosFromStatus(member string, status *replSetStatus) (xlog.Position, error) {
 	for _, m := range status.Members {
-		if m.Name == p.addr() {
+		if m.Name == member {
 			return xlog.Position(strconv.FormatInt(m.Optime.Timestamp, 10)), nil
 		}
 	}
-	return p.XLog().Zero(), fmt.Errorf("error getting xlog, couldn't find self in replSetStatus")
+	return p.XLog().Zero(), fmt.Errorf("error getting xlog, couldn't find member in replSetStatus")
 }
 
 func (p *Process) runCmd(cmd *exec.Cmd) error {
