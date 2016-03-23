@@ -20,7 +20,7 @@ type replSetConfig struct {
 type replicaState int
 
 const (
-	Startup = iota
+	Startup replicaState = iota
 	Primary
 	Secondary
 	Recovering
@@ -41,6 +41,7 @@ type replSetStatusMember struct {
 	Name      string        `bson:"name"`
 	Optime    replSetOptime `bson:"optime"`
 	SyncingTo string        `bson:"syncingTo"`
+	State     replicaState  `bson:"state"`
 }
 
 type replSetStatus struct {

@@ -314,7 +314,6 @@ func (p *Process) reconfigure(config *state.Config) error {
 			return nil
 		}
 
-		// TODO(jpg): We never need to reconfigure if we are are just a secondary.
 		// If we're already running and it's just a change from async to sync with the same node, we don't need to restart
 		if p.configApplied && p.running() && p.config() != nil && config != nil &&
 			p.config().Role == state.RoleAsync && config.Role == state.RoleSync && config.Upstream.Meta["MONGODB_ID"] == p.config().Upstream.Meta["MONGODB_ID"] {
@@ -324,14 +323,6 @@ func (p *Process) reconfigure(config *state.Config) error {
 		// Make sure that we don't keep waiting for replication sync while reconfiguring
 		p.cancelSyncWait()
 		p.syncedDownstreamValue.Store((*discoverd.Instance)(nil))
-
-		//TODO(jpg): We don't need to reconfigure on downstream change.
-		// If we're already running and this is only a downstream change, just wait for the new downstream to catch up
-		if p.running() && p.config().IsNewDownstream(config) {
-			logger.Info("downstream changed", "to", config.Downstream.Addr)
-			p.waitForSync(config.Downstream, false)
-			return nil
-		}
 
 		if config == nil {
 			config = p.config()
@@ -411,32 +402,25 @@ func (p *Process) assumePrimary(downstream *discoverd.Instance, clusterState *st
 func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error {
 	logger := p.Logger.New("fn", "assumeStandby", "upstream", upstream.Addr)
 
-	if p.running() {
+	if p.running() && !p.securityEnabled {
 		logger.Info("stopping database")
 		if err := p.stop(); err != nil {
 			return err
 		}
+
 	}
-
-	logger.Info("starting up as standby")
-
 	p.securityEnabled = true
 	if err := p.writeConfig(configData{ReplicationEnabled: true}); err != nil {
 		logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
 		return err
 	}
+	logger.Info("starting up as standby")
 
-	logger.Info("starting database")
-	if err := p.start(); err != nil {
-		return err
-	}
-
-	if err := p.replSetSyncFrom(upstream); err != nil {
-		return err
-	}
-
-	if err := p.waitForUpstream(upstream); err != nil {
-		return err
+	if !p.running() {
+		logger.Info("starting database")
+		if err := p.start(); err != nil {
+			return err
+		}
 	}
 
 	if downstream != nil {
@@ -628,10 +612,6 @@ func (p *Process) replSetInitiate() error {
 	return nil
 }
 
-// upstreamTimeout is of the order of the discoverd heartbeat to prevent
-// waiting for an upstream which has gone down.
-var upstreamTimeout = 10 * time.Second
-
 func (p *Process) addr() string {
 	return net.JoinHostPort(p.Host, p.Port)
 }
@@ -642,51 +622,12 @@ func httpAddr(addr string) string {
 	return fmt.Sprintf("%s:%d", host, port+1)
 }
 
-func (p *Process) waitForUpstream(upstream *discoverd.Instance) error {
-	logger := p.Logger.New("fn", "waitForUpstream", "upstream", upstream.Addr, "upstream_http_addr", httpAddr(upstream.Addr))
-	logger.Info("waiting for upstream to come online")
-	upstreamClient := client.NewClient(upstream.Addr)
-
-	timer := time.NewTimer(upstreamTimeout)
-	defer timer.Stop()
-
-	ticker := time.NewTicker(checkInterval)
-	defer ticker.Stop()
-
-	for {
-		status, err := upstreamClient.Status()
-		if err == nil {
-			logger.Info("status", "running", status.Database.Running, "xlog", status.Database.XLog, "user_exists", status.Database.UserExists)
-		}
-		if err != nil {
-			logger.Error("error getting upstream status", "err", err)
-		} else if status.Database.Running && status.Database.XLog != "" /*&& status.Database.UserExists*/ { // FIXME(benbjohnson)
-			logger.Info("upstream is online")
-			return nil
-		}
-
-		select {
-		case <-timer.C:
-			logger.Error("upstream did not come online in time")
-			return errors.New("upstream is offline")
-		case <-ticker.C:
-		}
-	}
-}
-
 func (p *Process) connectLocal() (*mgo.Session, error) {
 	session, err := mgo.DialWithInfo(p.DialInfo())
 	if err != nil {
 		return nil, err
 	}
-	switch p.config().Role {
-	case state.RolePrimary:
-		session.SetMode(mgo.Monotonic, true)
-	case state.RoleSync, state.RoleAsync:
-		session.SetMode(mgo.Secondary, true)
-	default:
-		panic(fmt.Sprintf("unknown role %s", p.config().Role))
-	}
+	session.SetMode(mgo.Eventual, true)
 	return session, nil
 }
 
@@ -794,13 +735,11 @@ func (p *Process) Info() (*client.DatabaseInfo, error) {
 		Running:          p.running(),
 		SyncedDownstream: p.syncedDownstream(),
 	}
-
 	xlog, err := p.XLogPosition()
 	info.XLog = string(xlog)
 	if err != nil {
 		return info, err
 	}
-
 	info.UserExists, err = p.userExists()
 	if err != nil {
 		return info, err
@@ -864,7 +803,6 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 		logger.Info("waiting for downstream replication to catch up")
 		defer logger.Info("finished waiting for downstream replication")
 
-		prevSlaveXLog := p.XLog().Zero()
 		for {
 			logger.Debug("checking downstream sync")
 
@@ -890,57 +828,18 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 				continue
 			}
 
-			// Read local master status.
-			masterXLog, err := p.xlogPosFromStatus(p.addr(), status)
-			if err != nil {
-				logger.Error("error reading master xlog", "err", err)
-				startTime = time.Now().UTC()
-				select {
-				case <-stopCh:
-					logger.Debug("canceled, stopping")
-					return
-				case <-time.After(checkInterval):
+			var synced bool
+			for _, m := range status.Members {
+				if m.Name == downstream.Addr && m.State == Secondary {
+					synced = true
 				}
-				continue
-			}
-			logger.Info("master xlog", "gtid", masterXLog)
-
-			// Read downstream slave status.
-			slaveXLog, err := p.xlogPosFromStatus(downstream.Addr, status)
-			if err != nil {
-				logger.Error("error reading slave xlog", "err", err)
-				startTime = time.Now().UTC()
-				select {
-				case <-stopCh:
-					logger.Debug("canceled, stopping")
-					return
-				case <-time.After(checkInterval):
-				}
-				continue
 			}
 
-			logger.Info("mongodb slave xlog", "gtid", slaveXLog)
-
-			elapsedTime := time.Since(startTime)
-			logger := logger.New(
-				"master_log_pos", masterXLog,
-				"slave_log_pos", slaveXLog,
-				"elapsed", elapsedTime,
-			)
-
-			// Mark downstream server as synced if the xlog matches the master.
-			if cmp, err := p.XLog().Compare(masterXLog, slaveXLog); err == nil && cmp == 0 {
-				logger.Info("downstream caught up")
+			if synced {
 				p.syncedDownstreamValue.Store(downstream)
 				break
 			}
-
-			// If the slave's xlog is making progress then reset the start time.
-			if cmp, err := p.XLog().Compare(prevSlaveXLog, slaveXLog); err == nil && cmp == -1 {
-				logger.Debug("slave status progressing, resetting start time")
-				startTime = time.Now().UTC()
-			}
-			prevSlaveXLog = slaveXLog
+			elapsedTime := time.Since(startTime)
 
 			if elapsedTime > p.ReplTimeout {
 				logger.Error("error checking replication status", "err", "downstream unable to make forward progress")
@@ -963,7 +862,7 @@ func (p *Process) DialInfo() *mgo.DialInfo {
 	localhost := net.JoinHostPort("localhost", p.Port)
 	info := &mgo.DialInfo{
 		Addrs:   []string{localhost},
-		Timeout: p.OpTimeout,
+		Timeout: 5 * time.Second,
 		Direct:  true,
 	}
 
