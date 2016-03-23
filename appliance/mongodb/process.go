@@ -730,6 +730,7 @@ func (p *Process) stop() error {
 }
 
 func (p *Process) Info() (*client.DatabaseInfo, error) {
+	logger := p.Logger.New("fn", "Info")
 	info := &client.DatabaseInfo{
 		Config:           p.config(),
 		Running:          p.running(),
@@ -738,14 +739,17 @@ func (p *Process) Info() (*client.DatabaseInfo, error) {
 	xlog, err := p.XLogPosition()
 	info.XLog = string(xlog)
 	if err != nil {
+		logger.Error("error getting xlog")
 		return info, err
 	}
 	info.UserExists, err = p.userExists()
 	if err != nil {
+		logger.Error("error checking userExists")
 		return info, err
 	}
 	info.ReadWrite, err = p.isReadWrite()
 	if err != nil {
+		logger.Error("error checking isReadWrite")
 		return info, err
 	}
 	return info, err
