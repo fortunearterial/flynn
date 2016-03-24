@@ -60,10 +60,9 @@ type Process struct {
 	configValue   atomic.Value // *Config
 	configApplied bool
 
+	securityEnabledValue  atomic.Value // bool
 	runningValue          atomic.Value // bool
 	syncedDownstreamValue atomic.Value // *discoverd.Instance
-
-	securityEnabled bool
 
 	ID           string
 	Singleton    bool
@@ -121,6 +120,7 @@ func NewProcess() *Process {
 }
 
 func (p *Process) running() bool         { return p.runningValue.Load().(bool) }
+func (p *Process) securityEnabled() bool { return p.securityEnabledValue.Load().(bool) }
 func (p *Process) config() *state.Config { return p.configValue.Load().(*state.Config) }
 
 func (p *Process) syncedDownstream() *discoverd.Instance {
@@ -374,7 +374,7 @@ func (p *Process) assumePrimary(downstream *discoverd.Instance, clusterState *st
 		panic(fmt.Sprintf("unexpected state running role=%s", p.config().Role))
 	}
 
-	p.securityEnabled = false
+	p.securityEnabledValue.Store(false)
 	if err := p.writeConfig(configData{}); err != nil {
 		logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
 		return err
@@ -402,14 +402,14 @@ func (p *Process) assumePrimary(downstream *discoverd.Instance, clusterState *st
 func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error {
 	logger := p.Logger.New("fn", "assumeStandby", "upstream", upstream.Addr)
 
-	if p.running() && !p.securityEnabled {
+	if p.running() && !p.securityEnabled() {
 		logger.Info("stopping database")
 		if err := p.stop(); err != nil {
 			return err
 		}
 
 	}
-	p.securityEnabled = true
+	p.securityEnabledValue.Store(true)
 	if err := p.writeConfig(configData{ReplicationEnabled: true}); err != nil {
 		logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
 		return err
@@ -533,7 +533,7 @@ func (p *Process) initPrimaryDB(clusterState *state.State) error {
 			return err
 		}
 		// we need to start the database with both replication and security disabled
-		p.securityEnabled = false
+		p.securityEnabledValue.Store(false)
 		if err := p.writeConfig(configData{}); err != nil {
 			logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
 			return err
@@ -549,7 +549,7 @@ func (p *Process) initPrimaryDB(clusterState *state.State) error {
 		if err := p.stop(); err != nil {
 			return err
 		}
-		p.securityEnabled = true
+		p.securityEnabledValue.Store(true)
 		if err := p.writeConfig(configData{ReplicationEnabled: true}); err != nil {
 			logger.Error("error writing config", "path", p.ConfigPath(), "err", err)
 			return err
@@ -869,7 +869,7 @@ func (p *Process) DialInfo() *mgo.DialInfo {
 		Direct:  true,
 	}
 
-	if p.securityEnabled {
+	if p.securityEnabled() {
 		info.Addrs = []string{p.addr()}
 		info.Database = "admin"
 		info.Username = "flynn"
@@ -906,7 +906,7 @@ func (p *Process) writeConfig(d configData) error {
 	d.ID = p.ID
 	d.Port = p.Port
 	d.DataDir = p.DataDir
-	d.SecurityEnabled = p.securityEnabled
+	d.SecurityEnabled = p.securityEnabled()
 
 	f, err := os.Create(p.ConfigPath())
 	if err != nil {
