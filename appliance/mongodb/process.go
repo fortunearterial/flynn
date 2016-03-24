@@ -581,7 +581,6 @@ func (p *Process) initPrimaryDB(clusterState *state.State) error {
 	err = p.setReplConfig(replSetNew)
 	if err != nil {
 		logger.Error("failed to reconfigure replia set", "err", err)
-		println("DBG: PASSWORD=", p.Password)
 		return err
 	}
 	return nil
