@@ -33,7 +33,7 @@ func (MongoDBSuite) TestSingletonPrimary(c *C) {
 	p.Singleton = true
 	p.Password = "password"
 	p.DataDir = c.MkDir()
-	p.Port = "7500"
+	p.Port = "8500"
 	p.OpTimeout = 30 * time.Second
 	keyFile := filepath.Join(p.DataDir, "Keyfile")
 	err := ioutil.WriteFile(keyFile, []byte("password"), 0600)
@@ -60,7 +60,7 @@ func (MongoDBSuite) TestSingletonPrimary(c *C) {
 	p.Singleton = true
 	p.Password = "password"
 	p.DataDir = c.MkDir()
-	p.Port = "7500"
+	p.Port = "8500"
 	p.OpTimeout = 30 * time.Second
 	keyFile = filepath.Join(p.DataDir, "Keyfile")
 	err = ioutil.WriteFile(keyFile, []byte("password"), 0600)
@@ -477,7 +477,7 @@ func (MongoDBSuite) TestRemoveNodes(c *C) {
 }
 
 // newPort represents the starting port when allocating new ports.
-var newPort uint32 = 7500
+var newPort uint32 = 8500
 
 func NewTestProcess(c *C, n uint32) *Process {
 	p := NewProcess()
