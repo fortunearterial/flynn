@@ -64,17 +64,16 @@ type Process struct {
 	runningValue          atomic.Value // bool
 	syncedDownstreamValue atomic.Value // *discoverd.Instance
 
-	ID           string
-	Singleton    bool
-	Host         string
-	Port         string
-	BinDir       string
-	DataDir      string
-	Password     string
-	ServerID     uint32
-	OpTimeout    time.Duration
-	ReplTimeout  time.Duration
-	WaitUpstream bool
+	ID          string
+	Singleton   bool
+	Host        string
+	Port        string
+	BinDir      string
+	DataDir     string
+	Password    string
+	ServerID    uint32
+	OpTimeout   time.Duration
+	ReplTimeout time.Duration
 
 	Logger log15.Logger
 
@@ -363,7 +362,7 @@ func (p *Process) assumePrimary(downstream *discoverd.Instance, clusterState *st
 		if err := p.setReplConfig(replSetNew); err != nil {
 			return err
 		}
-		p.waitForSync(downstream, true)
+		p.waitForSync(downstream)
 		return nil
 	}
 
@@ -393,7 +392,7 @@ func (p *Process) assumePrimary(downstream *discoverd.Instance, clusterState *st
 	}
 
 	if downstream != nil {
-		p.waitForSync(downstream, true)
+		p.waitForSync(downstream)
 	}
 
 	return nil
@@ -424,7 +423,7 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 	}
 
 	if downstream != nil {
-		p.waitForSync(downstream, false)
+		p.waitForSync(downstream)
 	}
 
 	return nil
@@ -782,7 +781,74 @@ func (p *Process) userExists() (bool, error) {
 	return entry.Retval != nil, nil
 }
 
-func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool) {
+func (p *Process) waitForSyncInner(downstream *discoverd.Instance, stopCh, doneCh chan struct{}) {
+	defer close(doneCh)
+
+	startTime := time.Now().UTC()
+	logger := p.Logger.New(
+		"fn", "waitForSync",
+		"sync_name", downstream.Meta["MONGODB_ID"],
+		"start_time", log15.Lazy{func() time.Time { return startTime }},
+	)
+
+	logger.Info("waiting for downstream replication to catch up")
+	defer logger.Info("finished waiting for downstream replication")
+
+	for {
+		logger.Debug("checking downstream sync")
+
+		// Check if "wait sync" has been canceled.
+		select {
+		case <-stopCh:
+			logger.Debug("canceled, stopping")
+			return
+		default:
+		}
+
+		// get repl status
+		status, err := p.replSetGetStatus()
+		if err != nil {
+			logger.Error("error getting replSetStatus")
+			startTime = time.Now().UTC()
+			select {
+			case <-stopCh:
+				logger.Debug("canceled, stopping")
+				return
+			case <-time.After(checkInterval):
+			}
+			continue
+		}
+
+		var synced bool
+		for _, m := range status.Members {
+			if m.Name == downstream.Addr && m.State == Secondary {
+				synced = true
+			}
+		}
+
+		if synced {
+			p.syncedDownstreamValue.Store(downstream)
+			break
+		}
+		elapsedTime := time.Since(startTime)
+
+		if elapsedTime > p.ReplTimeout {
+			logger.Error("error checking replication status", "err", "downstream unable to make forward progress")
+			return
+		}
+
+		logger.Debug("continuing replication check")
+		select {
+		case <-stopCh:
+			logger.Debug("canceled, stopping")
+			return
+		case <-time.After(checkInterval):
+		}
+	}
+
+}
+
+func (p *Process) waitForSync(downstream *discoverd.Instance) {
 	p.Logger.Debug("waiting for downstream sync")
 
 	stopCh := make(chan struct{})
@@ -793,71 +859,7 @@ func (p *Process) waitForSync(downstream *discoverd.Instance, enableWrites bool)
 		once.Do(func() { close(stopCh); <-doneCh })
 	}
 
-	go func() {
-		defer close(doneCh)
-
-		startTime := time.Now().UTC()
-		logger := p.Logger.New(
-			"fn", "waitForSync",
-			"sync_name", downstream.Meta["MONGODB_ID"],
-			"start_time", log15.Lazy{func() time.Time { return startTime }},
-		)
-
-		logger.Info("waiting for downstream replication to catch up")
-		defer logger.Info("finished waiting for downstream replication")
-
-		for {
-			logger.Debug("checking downstream sync")
-
-			// Check if "wait sync" has been canceled.
-			select {
-			case <-stopCh:
-				logger.Debug("canceled, stopping")
-				return
-			default:
-			}
-
-			// get repl status
-			status, err := p.replSetGetStatus()
-			if err != nil {
-				logger.Error("error getting replSetStatus")
-				startTime = time.Now().UTC()
-				select {
-				case <-stopCh:
-					logger.Debug("canceled, stopping")
-					return
-				case <-time.After(checkInterval):
-				}
-				continue
-			}
-
-			var synced bool
-			for _, m := range status.Members {
-				if m.Name == downstream.Addr && m.State == Secondary {
-					synced = true
-				}
-			}
-
-			if synced {
-				p.syncedDownstreamValue.Store(downstream)
-				break
-			}
-			elapsedTime := time.Since(startTime)
-
-			if elapsedTime > p.ReplTimeout {
-				logger.Error("error checking replication status", "err", "downstream unable to make forward progress")
-				return
-			}
-
-			logger.Debug("continuing replication check")
-			select {
-			case <-stopCh:
-				logger.Debug("canceled, stopping")
-				return
-			case <-time.After(checkInterval):
-			}
-		}
-	}()
+	go p.waitForSyncInner(downstream, stopCh, doneCh)
 }
 
 // DialInfo returns dial info for connecting to the local process as the "flynn" user.
