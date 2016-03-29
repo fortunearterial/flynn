@@ -52,7 +52,7 @@ var (
 
 // Process represents a MongoDB process.
 type Process struct {
-	mtx sync.Mutex
+	mtx sync.RWMutex
 
 	events chan state.DatabaseEvent
 
@@ -858,6 +858,8 @@ func (p *Process) waitForSync(downstream *discoverd.Instance) {
 	p.cancelSyncWait = func() {
 		once.Do(func() { close(stopCh); <-doneCh })
 	}
+
+	downstream = downstream.Clone()
 
 	go p.waitForSyncInner(downstream, stopCh, doneCh)
 }
