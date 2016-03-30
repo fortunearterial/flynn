@@ -52,13 +52,13 @@ var (
 
 // Process represents a MongoDB process.
 type Process struct {
-	mtx sync.RWMutex
+	mtx sync.Mutex
 
 	events chan state.DatabaseEvent
 
 	// Replication configuration
-	configValue   atomic.Value // *Config
-	configApplied bool
+	configValue        atomic.Value // *Config
+	configAppliedValue atomic.Value // bool
 
 	securityEnabledValue  atomic.Value // bool
 	runningValue          atomic.Value // bool
@@ -120,6 +120,7 @@ func NewProcess() *Process {
 
 func (p *Process) running() bool         { return p.runningValue.Load().(bool) }
 func (p *Process) securityEnabled() bool { return p.securityEnabledValue.Load().(bool) }
+func (p *Process) configApplied() bool   { return p.configAppliedValue.Load().(bool) }
 func (p *Process) config() *state.Config { return p.configValue.Load().(*state.Config) }
 
 func (p *Process) syncedDownstream() *discoverd.Instance {
@@ -151,7 +152,7 @@ func (p *Process) Reconfigure(config *state.Config) error {
 
 	if !p.running() {
 		p.configValue.Store(config)
-		p.configApplied = false
+		p.configAppliedValue.Store(false)
 		return nil
 	}
 
@@ -308,13 +309,13 @@ func (p *Process) reconfigure(config *state.Config) error {
 		}
 
 		// If we've already applied the same config, we don't need to do anything
-		if p.configApplied && config != nil && p.config() != nil && config.Equal(p.config()) && config.State.Equal(p.config().State) {
+		if p.configApplied() && config != nil && p.config() != nil && config.Equal(p.config()) && config.State.Equal(p.config().State) {
 			logger.Info("nothing to do", "reason", "config already applied")
 			return nil
 		}
 
 		// If we're already running and it's just a change from async to sync with the same node, we don't need to restart
-		if p.configApplied && p.running() && p.config() != nil && config != nil &&
+		if p.configApplied() && p.running() && p.config() != nil && config != nil &&
 			p.config().Role == state.RoleAsync && config.Role == state.RoleSync && config.Upstream.Meta["MONGODB_ID"] == p.config().Upstream.Meta["MONGODB_ID"] {
 			logger.Info("nothing to do", "reason", "becoming sync with same upstream")
 			return nil
@@ -338,7 +339,7 @@ func (p *Process) reconfigure(config *state.Config) error {
 
 	// Apply configuration.
 	p.configValue.Store(config)
-	p.configApplied = true
+	p.configAppliedValue.Store(true)
 
 	return nil
 }
@@ -827,7 +828,9 @@ func (p *Process) waitForSyncInner(downstream *discoverd.Instance, stopCh, doneC
 		}
 
 		if synced {
+			p.mtx.Lock()
 			p.syncedDownstreamValue.Store(downstream)
+			p.mtx.Unlock()
 			break
 		}
 		elapsedTime := time.Since(startTime)
@@ -858,8 +861,6 @@ func (p *Process) waitForSync(downstream *discoverd.Instance) {
 	p.cancelSyncWait = func() {
 		once.Do(func() { close(stopCh); <-doneCh })
 	}
-
-	downstream = downstream.Clone()
 
 	go p.waitForSyncInner(downstream, stopCh, doneCh)
 }
