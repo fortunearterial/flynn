@@ -382,7 +382,8 @@
     "app": {
       "name": "mongodb",
       "strategy": "sirenia",
-      "meta": {"flynn-system-app": "true"}
+      "meta": {"flynn-system-app": "true"},
+      "deploy_timeout": 240
     },
     "action": "deploy-app",
     "release": {
