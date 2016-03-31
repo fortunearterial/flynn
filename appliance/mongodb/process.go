@@ -430,7 +430,7 @@ func (p *Process) assumeStandby(upstream, downstream *discoverd.Instance) error 
 	return nil
 }
 
-func (p Process) replSetSyncFrom(upstream *discoverd.Instance) error {
+func (p *Process) replSetSyncFrom(upstream *discoverd.Instance) error {
 	session, err := p.connectLocal()
 	if err != nil {
 		return err
@@ -441,7 +441,7 @@ func (p Process) replSetSyncFrom(upstream *discoverd.Instance) error {
 	return session.Run(bson.M{"replSetSyncFrom": upstream.Addr}, &result)
 }
 
-func (p Process) replSetGetStatus() (*replSetStatus, error) {
+func (p *Process) replSetGetStatus() (*replSetStatus, error) {
 	session, err := p.connectLocal()
 	if err != nil {
 		return nil, err
@@ -457,7 +457,7 @@ func replSetGetStatusQuery(session *mgo.Session) (*replSetStatus, error) {
 	return &status, err
 }
 
-func (p Process) isReplInitialised() (bool, error) {
+func (p *Process) isReplInitialised() (bool, error) {
 	_, err := p.replSetGetStatus()
 	if err != nil {
 		if merr, ok := err.(*mgo.QueryError); ok && merr.Code == 94 {
@@ -468,7 +468,7 @@ func (p Process) isReplInitialised() (bool, error) {
 	return true, nil
 }
 
-func (p Process) isUserCreated() (bool, error) {
+func (p *Process) isUserCreated() (bool, error) {
 	session, err := mgo.DialWithInfo(p.DialInfo())
 	if err != nil {
 		return false, err
@@ -487,7 +487,7 @@ func (p Process) isUserCreated() (bool, error) {
 	return n > 0, nil
 }
 
-func (p Process) createUser() error {
+func (p *Process) createUser() error {
 	// create a new session
 	session, err := mgo.DialWithInfo(p.DialInfo())
 	if err != nil {
