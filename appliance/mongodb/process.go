@@ -936,6 +936,9 @@ storage:
   journal:
     enabled: true
   engine: wiredTiger
+  wiredTiger:
+    engineConfig:
+      cacheSizeGB: 1
 
 # systemLog:
 #  destination: file
