@@ -264,7 +264,7 @@ $$;`, step.Artifact.URI, step.ID))
 		}
 	}
 	if data.MongoDB != nil {
-		data.MongoDB.Artifact.URI = artifactURIs["mongodb"]
+		data.MongoDB.ImageArtifact.URI = artifactURIs["mongodb"]
 		if data.MongoDB.Processes["mongodb"] == 0 {
 			// skip mongodb if it wasn't scaled up in the backup
 			data.MongoDB = nil
@@ -418,7 +418,7 @@ WHERE release_id = (SELECT release_id FROM apps WHERE name = 'discoverd')
 
 	// load data into mongodb if it was present in the backup.
 	if mongodb != nil && data.MongoDB != nil {
-		cmd = exec.JobUsingHost(state.Hosts[0], host.Artifact{Type: data.MongoDB.Artifact.Type, URI: data.MongoDB.Artifact.URI}, nil)
+		cmd = exec.JobUsingHost(state.Hosts[0], host.Artifact{Type: data.MongoDB.ImageArtifact.Type, URI: data.MongoDB.ImageArtifact.URI}, nil)
 		cmd.Entrypoint = []string{"mongorestore"}
 		cmd.Cmd = []string{"-h", "leader.mongodb.discoverd", "-u", "flynn", "-p", data.MongoDB.Release.Env["MONGO_PWD"], "--archive"}
 		cmd.Stdin = mongodb
