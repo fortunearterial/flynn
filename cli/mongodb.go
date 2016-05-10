@@ -39,7 +39,7 @@ Examples:
 `)
 }
 
-func runMongodb(args *docopt.Args, client *controller.Client) error {
+func runMongodb(args *docopt.Args, client controller.Client) error {
 	config, err := getAppMongodbRunConfig(client)
 	if err != nil {
 		return err
@@ -55,7 +55,7 @@ func runMongodb(args *docopt.Args, client *controller.Client) error {
 	return nil
 }
 
-func getAppMongodbRunConfig(client *controller.Client) (*runConfig, error) {
+func getAppMongodbRunConfig(client controller.Client) (*runConfig, error) {
 	appRelease, err := client.GetAppRelease(mustApp())
 	if err != nil {
 		return nil, fmt.Errorf("error getting app release: %s", err)
@@ -63,7 +63,7 @@ func getAppMongodbRunConfig(client *controller.Client) (*runConfig, error) {
 	return getMongodbRunConfig(client, mustApp(), appRelease)
 }
 
-func getMongodbRunConfig(client *controller.Client, app string, appRelease *ct.Release) (*runConfig, error) {
+func getMongodbRunConfig(client controller.Client, app string, appRelease *ct.Release) (*runConfig, error) {
 	mongodbApp := appRelease.Env["FLYNN_MONGO"]
 	if mongodbApp == "" {
 		return nil, fmt.Errorf("No mongodb database found. Provision one with `flynn resource add mongodb`")
@@ -91,7 +91,7 @@ func getMongodbRunConfig(client *controller.Client, app string, appRelease *ct.R
 	return config, nil
 }
 
-func runMongo(args *docopt.Args, client *controller.Client, config *runConfig) error {
+func runMongo(args *docopt.Args, client controller.Client, config *runConfig) error {
 	config.Entrypoint = []string{"mongo"}
 	config.Env["PAGER"] = "less"
 	config.Env["LESS"] = "--ignore-case --LONG-PROMPT --SILENT --tabs=4 --quit-if-one-screen --no-init --quit-at-eof"
@@ -106,7 +106,7 @@ func runMongo(args *docopt.Args, client *controller.Client, config *runConfig) e
 	return runJob(client, *config)
 }
 
-func runMongodbDump(args *docopt.Args, client *controller.Client, config *runConfig) error {
+func runMongodbDump(args *docopt.Args, client controller.Client, config *runConfig) error {
 	config.Stdout = os.Stdout
 	if filename := args.String["--file"]; filename != "" {
 		f, err := os.Create(filename)
@@ -140,12 +140,12 @@ func configMongodbDump(config *runConfig) {
 	}
 }
 
-func mongodbDump(client *controller.Client, config *runConfig) error {
+func mongodbDump(client controller.Client, config *runConfig) error {
 	configMongodbDump(config)
 	return runJob(client, *config)
 }
 
-func runMongodbRestore(args *docopt.Args, client *controller.Client, config *runConfig) error {
+func runMongodbRestore(args *docopt.Args, client controller.Client, config *runConfig) error {
 	config.Stdin = os.Stdin
 	var size int64
 	if filename := args.String["--file"]; filename != "" {
@@ -178,7 +178,7 @@ func runMongodbRestore(args *docopt.Args, client *controller.Client, config *run
 	return mongodbRestore(client, config)
 }
 
-func mongodbRestore(client *controller.Client, config *runConfig) error {
+func mongodbRestore(client controller.Client, config *runConfig) error {
 	config.Entrypoint = []string{"/bin/restore-flynn-mongodb"}
 	config.Args = []string{
 		"--host", config.Env["MONGO_HOST"],
