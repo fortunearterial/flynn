@@ -384,6 +384,25 @@ $$ LANGUAGE plpgsql`,
 	migrations.Add(18,
 		`INSERT INTO event_types (name) VALUES ('app_garbage_collection')`,
 	)
+	migrations.Add(19,
+		`CREATE TABLE volume_cache (
+			volume_id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+			host_id text,
+			created_at timestamptz NOT NULL DEFAULT now(),
+			updated_at timestamptz NOT NULL DEFAULT now()
+		)`,
+		`CREATE TABLE volume_attachments (
+			volume_id uuid REFERENCES volume_cache (volume_id),
+			job_id uuid,
+			target text,
+			writeable boolean,
+			PRIMARY KEY (volume_id, job_id, target)
+		)`,
+		`CREATE TABLE persistence_policies (name text PRIMARY KEY)`,
+		`INSERT INTO persistence_policies (name) VALUES ('none')`,
+		`ALTER TABLE apps ADD COLUMN persistence_policy text DEFAULT 'none'`,
+		`ALTER TABLE apps ADD CONSTRAINT apps_persistence_policy_fkey FOREIGN KEY (persistence_policy) REFERENCES persistence_policies (name)`,
+	)
 }
 
 func migrateDB(db *postgres.DB) error {

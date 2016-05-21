@@ -521,7 +521,7 @@ func (f *ClusterFixer) FixSirenia(svc string) error {
 				return err
 			}
 		}
-		if err := utils.ProvisionVolume(secondHost, job); err != nil {
+		if _, err := utils.ProvisionVolume(secondHost, job); err != nil {
 			return fmt.Errorf("error creating volume on %s: %s", secondHost.ID(), err)
 		}
 		if err := secondHost.AddJob(job); err != nil {

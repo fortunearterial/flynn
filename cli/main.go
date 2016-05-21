@@ -63,6 +63,7 @@ Commands:
 	resource    provision a new resource
 	release     add a docker image release
 	deployment  list deployments
+	volume      list volumes
 	export      export app data
 	import      create app from exported data
 	version     show flynn version
