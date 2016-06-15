@@ -110,7 +110,7 @@ func NewPostgres(c Config) state.Database {
 		p.port = "5432"
 	}
 	if p.binDir == "" {
-		p.binDir = "/usr/lib/postgresql/9.4/bin/"
+		p.binDir = "/usr/lib/postgresql/9.5/bin/"
 	}
 	if p.dataDir == "" {
 		p.dataDir = "/data"
@@ -902,8 +902,8 @@ wal_level = hot_standby
 fsync = on
 max_wal_senders = 15
 wal_keep_segments = 1000
-checkpoint_completion_target = 0.9
-checkpoint_segments = 64
+min_wal_size = 128MB
+max_wal_size = 256MB
 synchronous_commit = remote_write
 synchronous_standby_names = '{{.Sync}}'
 {{if .ReadOnly}}
